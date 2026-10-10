@@ -1,0 +1,2190 @@
+(() => {
+  if (window.__WF_ENGINE_V2__) return;
+  window.__WF_ENGINE_V2__ = true;
+  const engineInstanceId = crypto.randomUUID
+    ? crypto.randomUUID()
+    : `engine-${Date.now()}-${Math.random()}`;
+
+  const state = {
+    settings: {},
+    flows: [],
+    contactLists: [],
+    sessions: {},
+    pausedUntil: {},
+    activeFlows: {},
+    completed: {},
+    processed: {},
+    queues: new Map(),
+    campaigns: [],
+    currentCampaignContext: null
+  };
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  let receiptCursor = 0;
+  let receiptSyncRunning = false;
+  let campaignSaveQueue = Promise.resolve();
+  let analyticsWriteQueue = Promise.resolve();
+  const campaignRunners = new Map();
+  const CONNECTION_PAUSE_MESSAGE =
+    "O WhatsApp foi desconectado. Entre na conta desejada e clique em Play para continuar do próximo contato.";
+
+  function interpolateContact(text, message, chatId) {
+    const phone = chatId.split("@")[0].replace(/\D/g, "");
+    const storedContact = state.contactLists
+      .flatMap(list => Array.isArray(list.contacts) ? list.contacts : [])
+      .find(contact => String(contact.phone || "").replace(/\D/g, "") === phone) || {};
+    const contact = { ...storedContact, ...(message?.contact || {}) };
+    const values = {
+      nome: contact.firstName || chatId.split("@")[0],
+      sobrenome: contact.lastName || "",
+      telefone: contact.phone || chatId.split("@")[0],
+      etiqueta: contact.tag || ""
+    };
+    return String(text || "").replace(
+      /\{(nome|sobrenome|telefone|etiqueta)\}/gi,
+      (_, key) => values[key.toLocaleLowerCase("pt-BR")] ?? ""
+    );
+  }
+
+  const normalize = value => String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("pt-BR")
+    .trim();
+
+  function applyRuntime(runtime = {}) {
+    state.sessions = runtime.sessions || {};
+    state.pausedUntil = runtime.pausedUntil || {};
+    state.activeFlows = runtime.activeFlows || {};
+    state.completed = runtime.completed || {};
+    state.processed = runtime.processed || {};
+  }
+
+  function reconcileCampaign(campaign) {
+    if (!campaign || !Array.isArray(campaign.recipients)) return campaign;
+    const derivedSent = campaign.recipients.filter(recipient => recipient.sentAt).length;
+    const derivedFailed = campaign.recipients.filter(recipient =>
+      recipient.state === "failed"
+    ).length;
+    const derivedProcessed = campaign.recipients.filter(recipient =>
+      ["sent", "failed"].includes(recipient.state)
+    ).length;
+    const derivedOpened = campaign.recipients.filter(recipient => recipient.openedAt).length;
+    const derivedResponded = campaign.recipients.filter(recipient => recipient.respondedAt).length;
+    const preserveImportedTotals = campaign.runnerId === "imported";
+    campaign.sent = preserveImportedTotals
+      ? Math.max(Number(campaign.sent || 0), derivedSent)
+      : derivedSent;
+    campaign.failed = preserveImportedTotals
+      ? Math.max(Number(campaign.failed || 0), derivedFailed)
+      : derivedFailed;
+    campaign.processed = preserveImportedTotals
+      ? Math.max(Number(campaign.processed || 0), derivedProcessed)
+      : derivedProcessed;
+    campaign.opened = preserveImportedTotals
+      ? Math.max(Number(campaign.opened || 0), derivedOpened)
+      : derivedOpened;
+    campaign.responded = preserveImportedTotals
+      ? Math.max(Number(campaign.responded || 0), derivedResponded)
+      : derivedResponded;
+
+    if (
+      ["running", "paused"].includes(campaign.status) &&
+      campaign.processed >= Number(campaign.total || 0)
+    ) {
+      campaign.status = "completed";
+      campaign.finishedAt ||= Date.now();
+      campaign.nextSend = "";
+      campaign.pauseReason = "";
+      campaign.pauseKind = "";
+      campaign.updatedAt = Date.now();
+    }
+    return campaign;
+  }
+
+  function firstPendingRecipient(campaign) {
+    return (campaign?.recipients || []).find(recipient =>
+      !["sent", "failed"].includes(recipient.state)
+    ) || null;
+  }
+
+  function updateCampaignNextSend(campaign) {
+    const next = firstPendingRecipient(campaign);
+    campaign.nextSend = next ? (next.name || next.phone || "Contato inválido") : "";
+  }
+
+  function repairWhatsappCampaignRecipientPhones(campaign) {
+    if (!String(campaign?.execution?.listId || "").startsWith("__whatsapp_")) {
+      return false;
+    }
+
+    let changed = false;
+    const repairedPhones = new Set();
+    (campaign.recipients || []).forEach(recipient => {
+      if (recipient.sentAt) return;
+
+      const displayPhone = [recipient.name, recipient.contact?.firstName]
+        .map(value => String(value || "").trim())
+        .find(value => value.startsWith("+") && /^\+?[\d\s().-]+$/.test(value));
+      const internationalPhone = String(displayPhone || "").replace(/\D/g, "");
+      const storedPhone = String(recipient.phone || "").replace(/\D/g, "");
+
+      // Contatos extraidos do proprio WhatsApp ja trazem o DDI. Versoes
+      // anteriores confundiam telefones internacionais de 10/11 digitos com
+      // numeros brasileiros e gravavam um 55 extra no inicio.
+      if (!internationalPhone || storedPhone !== `55${internationalPhone}`) return;
+
+      repairedPhones.add(storedPhone);
+      recipient.phone = internationalPhone;
+      if (recipient.contact) recipient.contact.phone = internationalPhone;
+      recipient.chatId = "";
+      recipient.chatIds = [];
+      recipient.messageIds = [];
+      recipient.state = "pending";
+      delete recipient.error;
+      changed = true;
+    });
+
+    if (!changed) return false;
+
+    campaign.errors = (campaign.errors || []).filter(error =>
+      !repairedPhones.has(String(error?.phone || "").replace(/\D/g, ""))
+    );
+    if (campaign.status === "completed" && firstPendingRecipient(campaign)) {
+      campaign.status = "paused";
+      campaign.pauseKind = "recovery";
+      campaign.pauseReason = "Telefones internacionais corrigidos. A campanha pode continuar com seguranca.";
+      campaign.finishedAt = null;
+    }
+    campaign.updatedAt = Date.now();
+    updateCampaignNextSend(campaign);
+    return true;
+  }
+
+  async function loadState() {
+    const data = await chrome.storage.local.get([
+      "wfSettings", "wfFlows", "wfRuntime", "wfContactLists", "wfCampaigns"
+    ]);
+
+    state.settings = data.wfSettings || {};
+    state.flows = Array.isArray(data.wfFlows) ? data.wfFlows : [];
+    // Restaura os gatilhos que a migração de segurança da revisão anterior
+    // desligou. O fluxo desta extensão deve reagir às mensagens recebidas que
+    // correspondem às palavras configuradas no editor.
+    if (Number(state.settings.inboundTriggerSafetyVersion || 0) === 1) {
+      state.flows = state.flows.map(flow => ({
+        ...flow,
+        triggersEnabled: true
+      }));
+      state.settings = {
+        ...state.settings,
+        inboundTriggerSafetyVersion: 2
+      };
+      await chrome.storage.local.set({
+        wfFlows: state.flows,
+        wfSettings: state.settings
+      });
+    }
+    state.contactLists = Array.isArray(data.wfContactLists) ? data.wfContactLists : [];
+    state.campaigns = Array.isArray(data.wfCampaigns) ? data.wfCampaigns : [];
+    let repairedCampaignPhones = false;
+    state.campaigns.forEach(campaign => {
+      repairedCampaignPhones = repairWhatsappCampaignRecipientPhones(campaign) || repairedCampaignPhones;
+      (campaign.recipients || []).forEach(recipient => {
+        if (recipient.sentAt && !recipient.flowCursor) recipient.state = "sent";
+        if (recipient.flowCursor) recipient.state = "pending";
+      });
+      reconcileCampaign(campaign);
+    });
+    const recoverable = state.campaigns.filter(item =>
+      ["running", "paused"].includes(item.status) &&
+      item.runnerId !== engineInstanceId
+    );
+    recoverable.forEach(campaign => {
+      const handled = (campaign.recipients || []).filter(item =>
+        ["sent", "failed"].includes(item.state)
+      ).length;
+      campaign.status = handled >= Number(campaign.total || 0)
+        ? "completed"
+        : "paused";
+      campaign.pauseKind = campaign.status === "paused"
+        ? (campaign.pauseKind || "recovery")
+        : "";
+      campaign.pauseReason = campaign.status === "paused"
+        ? (
+            campaign.pauseReason ||
+            "A campanha foi pausada com segurança após a recarga do WhatsApp. Clique em Play para continuar."
+          )
+        : "";
+      if (campaign.status === "paused") {
+        campaign.runnerId = engineInstanceId;
+        campaign.runToken = "";
+      }
+      campaign.interruptionReason = "";
+      campaign.finishedAt = campaign.status === "completed" ? (campaign.finishedAt || Date.now()) : null;
+      updateCampaignNextSend(campaign);
+      campaign.updatedAt = Date.now();
+    });
+    if (recoverable.length || repairedCampaignPhones) {
+      await chrome.storage.local.set({ wfCampaigns: state.campaigns });
+    }
+
+    applyRuntime(data.wfRuntime || {});
+
+    updateBadge();
+  }
+
+  const campaignId = () => crypto.randomUUID
+    ? crypto.randomUUID()
+    : `campaign-${Date.now()}-${Math.random()}`;
+
+  function findCampaign(id) {
+    return state.campaigns.find(item => item.id === id);
+  }
+
+  function flowHasSendableOutput(flow, visited = new Set()) {
+    if (!flow || visited.has(String(flow.id))) return false;
+    visited.add(String(flow.id));
+    return (flow.blocks || []).some(block => {
+      if (!block || block.enabled === false) return false;
+      if (block.type === "text") {
+        return (Array.isArray(block.messages) ? block.messages : [block.text])
+          .some(value => String(value || "").trim());
+      }
+      if (["image", "video", "audio", "media"].includes(block.type)) {
+        return Boolean(block.dataUrl);
+      }
+      if (block.type === "flow") {
+        const target = state.flows.find(item =>
+          String(item.id) === String(block.targetFlowId)
+        );
+        return flowHasSendableOutput(target, visited);
+      }
+      return false;
+    });
+  }
+
+  async function refreshStoredFlows() {
+    const stored = await chrome.storage.local.get("wfFlows");
+    if (Array.isArray(stored.wfFlows)) {
+      state.flows = stored.wfFlows;
+    }
+    return state.flows;
+  }
+
+  function latestFlowBlock(flow, blockIndex, fallbackBlock) {
+    const latestFlow = state.flows.find(item =>
+      String(item.id) === String(flow?.id)
+    );
+    if (!latestFlow) return fallbackBlock;
+    const blockId = String(fallbackBlock?.id || "");
+    if (blockId) {
+      return (
+        (latestFlow.blocks || []).find(block => String(block?.id) === blockId) ||
+        fallbackBlock
+      );
+    }
+    return latestFlow.blocks?.[blockIndex] || fallbackBlock;
+  }
+
+  function saveCampaigns() {
+    const persist = async () => {
+      const stored = await chrome.storage.local.get("wfCampaigns");
+      const persisted = Array.isArray(stored.wfCampaigns) ? stored.wfCampaigns : [];
+      const campaignsToPersist = state.campaigns.map(campaign => {
+        const persistedCampaign = persisted.find(item => item.id === campaign.id);
+        if (!persistedCampaign) {
+          reconcileCampaign(campaign);
+          return campaign;
+        }
+        const persistedOwnedElsewhere =
+          ["running", "paused"].includes(persistedCampaign.status) &&
+          persistedCampaign.runnerId &&
+          persistedCampaign.runnerId !== engineInstanceId;
+        const targetCampaign = persistedOwnedElsewhere
+          ? persistedCampaign
+          : campaign;
+        (campaign.recipients || []).forEach((recipient, index) => {
+          const targetRecipient = targetCampaign.recipients?.[index] ||
+            targetCampaign.recipients?.find(item => item.phone === recipient.phone);
+          const persistedRecipient = persistedCampaign.recipients?.[index] ||
+            persistedCampaign.recipients?.find(item => item.phone === recipient.phone);
+          if (!targetRecipient || !persistedRecipient) return;
+          const openedAt = Math.max(
+            Number(recipient.openedAt || 0),
+            Number(persistedRecipient.openedAt || 0)
+          );
+          const respondedAt = Math.max(
+            Number(recipient.respondedAt || 0),
+            Number(persistedRecipient.respondedAt || 0)
+          );
+          if (openedAt) targetRecipient.openedAt = openedAt;
+          if (respondedAt) {
+            targetRecipient.respondedAt = respondedAt;
+            const responseSource =
+              Number(recipient.respondedAt || 0) >=
+              Number(persistedRecipient.respondedAt || 0)
+                ? recipient
+                : persistedRecipient;
+            if (responseSource.responseMessageId) {
+              targetRecipient.responseMessageId = responseSource.responseMessageId;
+            }
+            if (responseSource.responseChatId) {
+              targetRecipient.responseChatId = responseSource.responseChatId;
+            }
+          }
+        });
+        reconcileCampaign(targetCampaign);
+        return targetCampaign;
+      });
+      state.campaigns = campaignsToPersist.slice(0, 100);
+      await chrome.storage.local.set({ wfCampaigns: state.campaigns });
+    };
+    campaignSaveQueue = campaignSaveQueue.then(persist, persist);
+    return campaignSaveQueue;
+  }
+
+  async function updateCampaign(id, updater) {
+    const campaign = findCampaign(id);
+    if (!campaign) return null;
+    const changed = updater(campaign);
+    if (changed === false) return campaign;
+    campaign.updatedAt = Date.now();
+    await saveCampaigns();
+    return campaign;
+  }
+
+  function campaignContact(recipient = {}) {
+    if (recipient.contact && typeof recipient.contact === "object") {
+      return { ...recipient.contact, phone: recipient.contact.phone || recipient.phone || "" };
+    }
+    const names = String(recipient.name || "").trim().split(/\s+/).filter(Boolean);
+    return {
+      firstName: names.shift() || "",
+      lastName: names.join(" "),
+      phone: recipient.phone || "",
+      tag: ""
+    };
+  }
+
+  async function campaignConnectionStatus() {
+    if (!window.WFBridge?.isReady?.()) {
+      return { connected: false, accountId: "" };
+    }
+    try {
+      const result = await window.WFBridge.command("PING", {}, 4000);
+      return {
+        connected:
+          result?.ready !== false &&
+          result?.authenticated !== false &&
+          result?.connected !== false,
+        accountId: String(result?.accountId || "")
+      };
+    } catch {
+      return { connected: false, accountId: "" };
+    }
+  }
+
+  function isConnectionFailure(error) {
+    if (["WF_DISCONNECTED", "WF_UNAUTHENTICATED"].includes(error?.code)) {
+      return true;
+    }
+    const message = String(error?.message || error || "");
+    return /desconectad|não autenticad|nao autenticad|reconecte|connection|context invalidated|tempo esgotado ao executar o comando|motor.*não.*disponível|motor.*nao.*disponivel/i
+      .test(message);
+  }
+
+  async function pauseCampaignForConnection(campaign, reason = CONNECTION_PAUSE_MESSAGE) {
+    if (!campaign || campaign.status === "interrupted") return;
+    campaign.status = "paused";
+    campaign.pauseKind = "connection";
+    campaign.pauseReason = reason;
+    campaign.interruptionReason = "";
+    campaign.finishedAt = null;
+    updateCampaignNextSend(campaign);
+    campaign.updatedAt = Date.now();
+    await saveCampaigns();
+  }
+
+  function assertActiveCampaignCanSend() {
+    const context = state.currentCampaignContext;
+    if (!context) return;
+    const campaign = findCampaign(context.campaignId);
+    if (
+      campaign?.status === "running" &&
+      campaign.runnerId === engineInstanceId &&
+      (!context.runToken || campaign.runToken === context.runToken)
+    ) return;
+    const error = new Error("A campanha foi pausada antes deste envio.");
+    error.code = "WF_CAMPAIGN_PAUSED";
+    throw error;
+  }
+
+  function normalizeMessageTimestamp(value) {
+    let timestamp = Number(value || 0);
+    if (timestamp && timestamp < 1e12) timestamp *= 1000;
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
+  function isTechnicalIncomingMessage(message) {
+    return /^(protocol|e2e_notification|notification|gp2|revoked|ciphertext|unknown|call_log|missed_call|reaction|reaction_message|poll_update|sender_key_distribution|placeholder)$/i
+      .test(String(message?.type || "").trim());
+  }
+
+  function hasInboundFlowContent(message) {
+    if (isTechnicalIncomingMessage(message)) return false;
+    return Boolean(
+      String(message?.body || "").trim() ||
+      String(message?.type || "").trim()
+    );
+  }
+
+  function isRealCampaignResponse(message) {
+    const chatId = String(message?.chatId || "");
+    if (
+      message?.fromMe !== false ||
+      message?.isGroup === true ||
+      chatId.endsWith("@g.us") ||
+      !message?.id ||
+      !normalizeMessageTimestamp(message?.timestamp) ||
+      isTechnicalIncomingMessage(message)
+    ) return false;
+    return Boolean(
+      String(message?.body || "").trim() ||
+      String(message?.type || "").trim()
+    );
+  }
+
+  function recipientMatchesMessage(recipient, message) {
+    const ids = [message?.chatId, message?.from]
+      .map(value => String(value || ""))
+      .filter(value => value && !value.endsWith("@g.us"));
+    if (ids.some(id => recipient.chatIds?.includes(id) || recipient.chatId === id)) return true;
+    const phone = ids
+      .filter(id => id.endsWith("@c.us"))
+      .map(id => id.split("@")[0].replace(/\D/g, ""))[0] || "";
+    return Boolean(phone && recipient.phone === phone);
+  }
+
+  function campaignResponseBoundaries() {
+    const byPhone = new Map();
+    state.campaigns.forEach(campaign => {
+      (campaign.recipients || []).forEach((recipient, index) => {
+        const phone = String(recipient.phone || "").replace(/\D/g, "");
+        const sentAt = Number(recipient.sentAt || 0);
+        if (!phone || !sentAt) return;
+        if (!byPhone.has(phone)) byPhone.set(phone, []);
+        byPhone.get(phone).push({
+          key: `${campaign.id}:${index}`,
+          sentAt,
+          campaignCreatedAt: Number(campaign.createdAt || 0),
+          index
+        });
+      });
+    });
+    const boundaries = new Map();
+    byPhone.forEach(entries => {
+      entries.sort((left, right) =>
+        left.sentAt - right.sentAt ||
+        left.campaignCreatedAt - right.campaignCreatedAt ||
+        left.index - right.index
+      );
+      entries.forEach((entry, index) => {
+        boundaries.set(entry.key, Number(entries[index + 1]?.sentAt || 0));
+      });
+    });
+    return boundaries;
+  }
+
+  async function refreshCampaignReceipts() {
+    if (receiptSyncRunning || !window.WFBridge?.isReady?.()) return;
+    receiptSyncRunning = true;
+    try {
+    const responseBoundaries = campaignResponseBoundaries();
+    const allPending = state.campaigns
+      .filter(campaign => Date.now() - Number(campaign.createdAt || 0) < 7 * 86400000)
+      .flatMap(campaign =>
+        (campaign.recipients || [])
+          .map((recipient, index) => ({ recipient, index }))
+          .filter(({ recipient }) =>
+            recipient.sentAt && (!recipient.openedAt || !recipient.respondedAt)
+          )
+          .map(({ recipient, index }) => ({
+            campaign,
+            recipient,
+            key: `${campaign.id}:${index}`
+          }))
+      );
+    const pending = allPending.length
+      ? Array.from(
+          { length: Math.min(20, allPending.length) },
+          (_, index) => allPending[(receiptCursor + index) % allPending.length]
+        )
+      : [];
+    receiptCursor = allPending.length
+      ? (receiptCursor + pending.length) % allPending.length
+      : 0;
+    if (!pending.length) return;
+      const result = await window.WFBridge.command("CHECK_CAMPAIGN_ACTIVITY", {
+        recipients: pending.map(({ recipient, key }) => ({
+           key,
+           sentAt: recipient.sentAt,
+           responseBefore: responseBoundaries.get(key) || 0,
+           messageIds: recipient.messageIds || [],
+          chatIds: [
+            ...(recipient.chatIds || []),
+            recipient.chatId,
+            recipient.phone ? `${recipient.phone}@c.us` : ""
+          ].filter(Boolean)
+        }))
+      }, 30000);
+      const activity = new Map(
+        (result?.result?.activity || []).map(item => [String(item.key), item])
+      );
+      const touched = new Set();
+      const usedResponseIds = new Set(
+        state.campaigns.flatMap(campaign =>
+          (campaign.recipients || [])
+            .map(recipient => String(recipient.responseMessageId || ""))
+            .filter(Boolean)
+        )
+      );
+      pending.forEach(({ campaign, recipient, key }) => {
+        const item = activity.get(key);
+        if (!item) return;
+        if (item.opened && !recipient.openedAt) {
+          recipient.openedAt = Date.now();
+          touched.add(campaign.id);
+        }
+        if (item.responded && !recipient.respondedAt) {
+          const responseMessageId = String(item.responseMessageId || "");
+          if (responseMessageId && usedResponseIds.has(responseMessageId)) return;
+          recipient.respondedAt =
+            normalizeMessageTimestamp(item.respondedAt) ||
+            Date.now();
+          if (responseMessageId) {
+            recipient.responseMessageId = responseMessageId;
+            usedResponseIds.add(responseMessageId);
+          }
+          if (!recipient.openedAt) recipient.openedAt = recipient.respondedAt;
+          touched.add(campaign.id);
+        }
+      });
+      if (!touched.size) return;
+      touched.forEach(id => {
+        const campaign = findCampaign(id);
+        campaign.opened = campaign.recipients.filter(item => item.openedAt).length;
+        campaign.responded = campaign.recipients.filter(item => item.respondedAt).length;
+        campaign.updatedAt = Date.now();
+      });
+      await saveCampaigns();
+    } catch {
+    } finally {
+      receiptSyncRunning = false;
+    }
+  }
+
+  async function trackCampaignMessage(chatId, result) {
+    const context = state.currentCampaignContext;
+    if (!context || context.chatId !== chatId) return;
+    const messageId = String(result?.result?.messageId || result?.messageId || "");
+    await updateCampaign(context.campaignId, campaign => {
+      if (
+        context.runnerId &&
+        (
+          campaign.runnerId !== context.runnerId ||
+          campaign.runToken !== context.runToken
+        )
+      ) return false;
+      const recipient = Number.isInteger(context.recipientIndex)
+        ? campaign.recipients[context.recipientIndex]
+        : campaign.recipients.find(item => item.phone === context.phone);
+      if (!recipient) return;
+      if (messageId && !recipient.messageIds.includes(messageId)) recipient.messageIds.push(messageId);
+      if (!recipient.sentAt) {
+        recipient.sentAt = Date.now();
+        recipient.state = "sending";
+        campaign.sent = campaign.recipients.filter(item => item.sentAt).length;
+        campaign.lastSent = recipient.name || recipient.phone;
+      }
+    });
+  }
+
+  async function checkpointCampaignFlow(flowId, blockIndex, completed = false) {
+    const context = state.currentCampaignContext;
+    if (!context) return;
+    await updateCampaign(context.campaignId, campaign => {
+      if (
+        context.runnerId &&
+        (
+          campaign.runnerId !== context.runnerId ||
+          campaign.runToken !== context.runToken
+        )
+      ) return false;
+      const recipient = Number.isInteger(context.recipientIndex)
+        ? campaign.recipients[context.recipientIndex]
+        : campaign.recipients.find(item => item.phone === context.phone);
+      if (!recipient) return false;
+      if (completed) {
+        delete recipient.flowCursor;
+        recipient.flowCompletedAt = Date.now();
+      } else {
+        recipient.flowCursor = {
+          flowId: String(flowId || ""),
+          blockIndex: Math.max(0, Number(blockIndex) || 0)
+        };
+        recipient.state = "pending";
+      }
+    });
+  }
+
+  async function saveRuntime() {
+    const keys = Object.keys(state.processed);
+
+    if (keys.length > 500) {
+      const recent = keys
+        .sort((a, b) => state.processed[a] - state.processed[b])
+        .slice(-250);
+      state.processed = Object.fromEntries(
+        recent.map(key => [key, state.processed[key]])
+      );
+    }
+
+    await chrome.storage.local.set({
+      wfRuntime: {
+        sessions: state.sessions,
+        pausedUntil: state.pausedUntil,
+        activeFlows: state.activeFlows,
+        completed: state.completed,
+        processed: state.processed
+      }
+    });
+  }
+
+  function updateBadge(text = null, mode = null) {
+    if (!window.WFBridge) return;
+
+    if (text) {
+      window.WFBridge.setBadge(text, mode || "work");
+      return;
+    }
+
+    const active = state.flows.filter(flow => flow.enabled).length;
+    window.WFBridge.setBadge(
+      state.settings.enabled
+        ? `ligado · ${active} fluxo(s)`
+        : "automação desligada",
+      state.settings.enabled ? "on" : "off"
+    );
+  }
+
+  function matches(text, type, values) {
+    const incoming = normalize(text);
+    if (type === "any") return true;
+
+    return (Array.isArray(values) ? values : [values]).some(value => {
+      const expected = normalize(value);
+      if (!expected) return false;
+      if (type === "equals") return incoming === expected;
+      if (type === "starts") return incoming.startsWith(expected);
+      return incoming.includes(expected);
+    });
+  }
+
+  function findTriggeredFlow(message, chatId, { explicitOnly = false } = {}) {
+    return window.WFTriggerMatcher?.findBest({
+      flows: state.flows,
+      text: message?.body,
+      chatId,
+      completed: state.completed,
+      explicitOnly
+    }) || null;
+  }
+
+  async function analytics(flowId, updater) {
+    analyticsWriteQueue = analyticsWriteQueue.catch(() => {}).then(async () => {
+      const data = await chrome.storage.local.get("wfAnalytics");
+      const all = data.wfAnalytics || {};
+      const current = all[flowId] || {};
+      const next = updater({
+        starts: Number(current.starts || 0),
+        completions: Number(current.completions || 0),
+        responses: Number(current.responses || Object.keys(current.responseChats || {}).length),
+        startedChats: { ...(current.startedChats || {}) },
+        responseChats: { ...(current.responseChats || {}) },
+        blocks: { ...(current.blocks || {}) },
+        triggers: { ...(current.triggers || {}) }
+      });
+      await chrome.storage.local.set({
+        wfAnalytics: { ...all, [flowId]: next }
+      });
+    });
+    return analyticsWriteQueue;
+  }
+
+  async function countStart(flowId, chatId, messageTimestamp) {
+    const startedAt = normalizeMessageTimestamp(messageTimestamp) || Date.now();
+    await analytics(flowId, item => ({
+      ...item,
+      starts: item.starts + 1,
+      startedChats: {
+        ...item.startedChats,
+        [chatId]: startedAt
+      }
+    }));
+  }
+
+  async function countResponse(message) {
+    const chatId = String(message?.chatId || "");
+    if (!chatId) return;
+
+    analyticsWriteQueue = analyticsWriteQueue.catch(() => {}).then(async () => {
+      const data = await chrome.storage.local.get("wfAnalytics");
+      const all = data.wfAnalytics || {};
+      const receivedAt = normalizeMessageTimestamp(message?.timestamp) || Date.now();
+      let latest = null;
+
+      for (const [flowId, metrics] of Object.entries(all)) {
+        const startedAt = Number(metrics?.startedChats?.[chatId] || 0);
+        if (!startedAt || receivedAt < startedAt) continue;
+        if (!latest || startedAt > latest.startedAt) {
+          latest = { flowId, metrics, startedAt };
+        }
+      }
+
+      if (!latest || latest.metrics?.responseChats?.[chatId]) return;
+      const responseChats = {
+        ...(latest.metrics.responseChats || {}),
+        [chatId]: receivedAt
+      };
+      all[latest.flowId] = {
+        ...latest.metrics,
+        responses: Object.keys(responseChats).length,
+        responseChats
+      };
+      await chrome.storage.local.set({ wfAnalytics: all });
+    });
+    return analyticsWriteQueue;
+  }
+
+  async function countBlock(flowId, blockId) {
+    await analytics(flowId, item => ({
+      ...item,
+      blocks: {
+        ...item.blocks,
+        [blockId]: Number(item.blocks[blockId] || 0) + 1
+      }
+    }));
+  }
+
+  async function countCompletion(flowId) {
+    await analytics(flowId, item => ({
+      ...item,
+      completions: item.completions + 1
+    }));
+  }
+
+  async function countTrigger(flowId, triggerId) {
+    await analytics(flowId, item => ({
+      ...item,
+      triggers: {
+        ...item.triggers,
+        [triggerId]: Number(item.triggers[triggerId] || 0) + 1
+      }
+    }));
+  }
+
+  async function sendText(chatId, text, showTyping, showLinkPreview) {
+    assertActiveCampaignCanSend();
+    if (showTyping) {
+      updateBadge("escrevendo...", "work");
+
+      try {
+        await window.WFBridge.command("SET_TYPING", {
+          chatId,
+          active: true
+        }, 5000);
+      } catch {}
+
+      await sleep(3000);
+      assertActiveCampaignCanSend();
+
+      try {
+        await window.WFBridge.command("SET_TYPING", {
+          chatId,
+          active: false
+        }, 5000);
+      } catch {}
+    }
+
+    assertActiveCampaignCanSend();
+    const resolvedText = typeof text === "function"
+      ? await text()
+      : text;
+    assertActiveCampaignCanSend();
+    const result = await window.WFBridge.command("SEND_TEXT", {
+      chatId,
+      text: String(resolvedText || ""),
+      linkPreview: showLinkPreview === true
+    }, 60000);
+    await trackCampaignMessage(chatId, result);
+    return result;
+  }
+
+  async function showRecording(chatId, seconds) {
+    const duration = Math.min(300, Math.max(1, Number(seconds) || 3));
+    updateBadge("gravando...", "work");
+
+    try {
+      await window.WFBridge.command("SET_RECORDING", {
+        chatId,
+        active: true
+      }, 5000);
+    } catch {}
+
+    await sleep(duration * 1000);
+
+    try {
+      await window.WFBridge.command("SET_RECORDING", {
+        chatId,
+        active: false
+      }, 5000);
+    } catch {}
+  }
+
+  async function executeFlow(
+    flow,
+    message,
+    startIndex = 0,
+    replyText = "",
+    visitedFlows = new Set(),
+    executionRunId = ""
+  ) {
+    const chatId = message.chatId;
+    let index = startIndex;
+    let guard = 0;
+    const runId = executionRunId || `flow-run-${engineInstanceId}-${Date.now()}-${Math.random()}`;
+
+    if (visitedFlows.has(flow.id)) {
+      throw new Error(`Conexão circular detectada no fluxo ${flow.name}.`);
+    }
+    visitedFlows.add(flow.id);
+
+    state.activeFlows[chatId] = {
+      flowId: flow.id,
+      name: flow.name || "Fluxo sem nome",
+      runId,
+      currentIndex: index,
+      currentType: ""
+    };
+    await saveRuntime();
+
+    if (startIndex === 0) await countStart(flow.id, chatId, message?.timestamp);
+    updateBadge(`executando: ${flow.name}`, "work");
+
+    while (index < flow.blocks.length && guard++ < 150) {
+      assertActiveCampaignCanSend();
+      await checkpointCampaignFlow(flow.id, index);
+      if ((state.pausedUntil[chatId] || 0) > Date.now()) return;
+      if (
+        state.activeFlows[chatId]?.flowId !== flow.id ||
+        state.activeFlows[chatId]?.runId !== runId
+      ) return;
+
+      const block = flow.blocks[index];
+
+      if (!block || block.enabled === false) {
+        index++;
+        await checkpointCampaignFlow(flow.id, index);
+        continue;
+      }
+
+      state.activeFlows[chatId] = {
+        ...state.activeFlows[chatId],
+        flowId: flow.id,
+        name: flow.name || "Fluxo sem nome",
+        runId,
+        currentIndex: index,
+        currentType: block.type || ""
+      };
+      await saveRuntime();
+
+      await countBlock(flow.id, block.id);
+
+      if (block.type === "text") {
+        const resolveLatestText = async () => {
+          let sourceBlock = block;
+          if (state.currentCampaignContext) {
+            await refreshStoredFlows();
+            sourceBlock = latestFlowBlock(flow, index, block);
+          }
+          const messages = (
+            Array.isArray(sourceBlock?.messages)
+              ? sourceBlock.messages
+              : [sourceBlock?.text]
+          )
+            .map(text => String(text || ""))
+            .filter(text => text.trim());
+          const selectedText = messages.length
+            ? messages[Math.floor(Math.random() * messages.length)]
+            : "";
+          return interpolateContact(selectedText, message, chatId);
+        };
+        await sendText(
+          chatId,
+          resolveLatestText,
+          block.showTyping !== false,
+          block.showLinkPreview === true
+        );
+        index++;
+        await checkpointCampaignFlow(flow.id, index);
+        continue;
+      }
+
+      if (block.type === "wait") {
+        let waitSeconds = Math.max(0, Number(block.seconds) || 0);
+
+        if (block.varyInterval) {
+          const first = Math.max(0, Math.floor(Number(block.minSeconds) || 0));
+          const second = Math.max(0, Math.floor(Number(block.maxSeconds) || 0));
+          const minimum = Math.min(first, second);
+          const maximum = Math.max(first, second);
+          waitSeconds = minimum + Math.floor(Math.random() * (maximum - minimum + 1));
+        }
+
+        await sleep(waitSeconds * 1000);
+        assertActiveCampaignCanSend();
+        index++;
+        await checkpointCampaignFlow(flow.id, index);
+        continue;
+      }
+
+      if (["image", "video", "audio", "media"].includes(block.type)) {
+        if (!block.dataUrl) {
+          throw new Error(`Arquivo ausente no bloco ${index + 1}.`);
+        }
+
+        if (block.type === "audio" && block.showRecording) {
+          await showRecording(chatId, block.recordingSeconds);
+        }
+
+        try {
+          assertActiveCampaignCanSend();
+          const outgoingBlock = {
+            ...block,
+            caption: interpolateContact(block.caption, message, chatId)
+          };
+          const mediaResult = await window.WFBridge.command(
+            "SEND_FILE",
+            { chatId, block: outgoingBlock },
+            35000
+          );
+          await trackCampaignMessage(chatId, mediaResult);
+        } catch (error) {
+          console.error(
+            `[WA Flow] Mídia do bloco ${index + 1} não foi enviada:`,
+            error
+          );
+          updateBadge(`mídia não enviada`, "error");
+          throw error;
+        }
+
+        index++;
+        await checkpointCampaignFlow(flow.id, index);
+        continue;
+      }
+
+      if (block.type === "await") {
+        const limited = Boolean(block.useTimeout);
+        const legacyTimeoutAmount = Math.max(
+          1,
+          Number(block.timeoutAmount ?? block.timeoutMinutes) || 1440
+        );
+        const firstTimeoutAmount = Math.max(
+          1,
+          Math.floor(Number(block.timeoutMinAmount ?? legacyTimeoutAmount) || legacyTimeoutAmount)
+        );
+        const secondTimeoutAmount = Math.max(
+          1,
+          Math.floor(Number(block.timeoutMaxAmount ?? legacyTimeoutAmount) || legacyTimeoutAmount)
+        );
+        const minimumTimeoutAmount = Math.min(firstTimeoutAmount, secondTimeoutAmount);
+        const maximumTimeoutAmount = Math.max(firstTimeoutAmount, secondTimeoutAmount);
+        const varyTimeout = block.varyTimeout !== undefined
+          ? Boolean(block.varyTimeout)
+          : block.timeoutMinAmount !== undefined || block.timeoutMaxAmount !== undefined;
+        const timeoutAmount = varyTimeout
+          ? minimumTimeoutAmount + Math.floor(
+              Math.random() * (maximumTimeoutAmount - minimumTimeoutAmount + 1)
+            )
+          : legacyTimeoutAmount;
+        const timeoutMultiplier = block.timeoutAmount !== undefined
+          ? ({ seconds: 1000, minutes: 60000, hours: 3600000 })[block.timeoutUnit] || 60000
+          : 60000;
+
+        state.sessions[chatId] = {
+          flowId: flow.id,
+          nextIndex: index + 1,
+          expiresAt: limited
+            ? Date.now() + timeoutAmount * timeoutMultiplier
+            : null,
+          timeoutAction: limited
+            ? (["continue", "expire", "connect"].includes(block.timeoutAction)
+                ? block.timeoutAction
+                : "continue")
+            : "wait",
+          timeoutTargetFlowId: limited && block.timeoutAction === "connect"
+            ? String(block.timeoutTargetFlowId || "")
+            : ""
+        };
+
+        await saveRuntime();
+        updateBadge("aguardando resposta", "work");
+        await checkpointCampaignFlow(flow.id, index + 1, true);
+        return;
+      }
+
+      if (block.type === "condition") {
+        const ok = matches(
+          replyText,
+          block.matchType || "contains",
+          [block.value || ""]
+        );
+
+        const target = ok
+          ? Number(block.yesIndex)
+          : Number(block.noIndex);
+
+        index = target > 0 ? target - 1 : index + 1;
+        await checkpointCampaignFlow(flow.id, index);
+        continue;
+      }
+
+      if (block.type === "pause") {
+        state.pausedUntil[chatId] =
+          Date.now() + (Number(block.minutes) || 720) * 60000;
+
+        delete state.sessions[chatId];
+        delete state.activeFlows[chatId];
+        await saveRuntime();
+        updateBadge();
+        await checkpointCampaignFlow(flow.id, index + 1, true);
+        return;
+      }
+
+      if (block.type === "label") {
+        if (!block.labelId && !block.labelName) {
+          throw new Error(`Etiqueta não selecionada no bloco ${index + 1}.`);
+        }
+        await window.WFBridge.command("APPLY_CHAT_LABEL", {
+          chatId,
+          labelId: String(block.labelId || ""),
+          labelName: String(block.labelName || "")
+        }, 15000);
+        index++;
+        await checkpointCampaignFlow(flow.id, index);
+        continue;
+      }
+
+      if (block.type === "flow") {
+        const targetFlow = state.flows.find(item =>
+          String(item.id) === String(block.targetFlowId)
+        );
+        if (!targetFlow) {
+          throw new Error(`Fluxo conectado não encontrado no bloco ${index + 1}.`);
+        }
+
+        await countCompletion(flow.id);
+        if (flow.oncePerChat) {
+          state.completed[`${chatId}:${flow.id}`] = true;
+          await saveRuntime();
+        }
+        await checkpointCampaignFlow(targetFlow.id, 0);
+        await executeFlow(targetFlow, message, 0, replyText, visitedFlows);
+        return;
+      }
+
+      index++;
+    }
+
+    await countCompletion(flow.id);
+    if (state.activeFlows[chatId]?.runId === runId) {
+      delete state.activeFlows[chatId];
+    }
+
+    if (flow.oncePerChat) {
+      state.completed[`${chatId}:${flow.id}`] = true;
+    }
+    await saveRuntime();
+    await checkpointCampaignFlow(flow.id, index, true);
+
+    updateBadge();
+  }
+
+  async function processMessage(message) {
+    await stateReady;
+
+    if (!state.settings.enabled) return;
+    if (!message?.chatId || message.fromMe || !hasInboundFlowContent(message)) return;
+    if (state.settings.ignoreGroups && message.isGroup) return;
+    if (state.processed[message.id]) return;
+
+    state.processed[message.id] = Date.now();
+    await saveRuntime();
+    await countResponse(message);
+
+    const chatId = message.chatId;
+
+    const session = state.sessions[chatId];
+
+    if (session) {
+      const waiting =
+        session.expiresAt === null ||
+        session.expiresAt === undefined ||
+        session.expiresAt > Date.now();
+
+      if (waiting) {
+        const triggered = findTriggeredFlow(message, chatId, { explicitOnly: true });
+        if (triggered) {
+          delete state.sessions[chatId];
+          delete state.activeFlows[chatId];
+          await saveRuntime();
+          await countTrigger(triggered.flow.id, triggered.matchedTriggerId);
+          await executeFlow(triggered.flow, message, 0, message.body);
+          return;
+        }
+
+        const flow = state.flows.find(item =>
+          item.id === session.flowId && item.enabled
+        );
+
+        delete state.sessions[chatId];
+        await saveRuntime();
+
+        if (flow) {
+          await executeFlow(flow, message, session.nextIndex, String(message.body || ""));
+        }
+        return;
+      }
+
+      return;
+    }
+
+    if ((state.pausedUntil[chatId] || 0) > Date.now()) return;
+    const triggered = findTriggeredFlow(message, chatId);
+    if (!triggered) {
+      updateBadge(
+        String(message.body || "").trim()
+          ? "mensagem sem gatilho"
+          : "arquivo recebido sem gatilho",
+        "on"
+      );
+      return;
+    }
+
+    await countTrigger(triggered.flow.id, triggered.matchedTriggerId);
+
+    await executeFlow(triggered.flow, message, 0, message.body);
+  }
+
+  function enqueue(message) {
+    const chatId = message.chatId;
+    const previous = state.queues.get(chatId) || Promise.resolve();
+
+    const next = previous
+      .then(() => processMessage(message))
+      .catch(error => {
+        console.error("[WA Flow Engine v2]", error);
+        updateBadge(`erro: ${error.message}`, "error");
+      })
+      .finally(() => {
+        if (state.queues.get(chatId) === next) {
+          state.queues.delete(chatId);
+        }
+      });
+
+    state.queues.set(chatId, next);
+  }
+
+  async function processTimeouts() {
+    await stateReady;
+    if (!state.settings.enabled) return;
+
+    const now = Date.now();
+
+    for (const [chatId, session] of Object.entries(state.sessions)) {
+      if (
+        session.expiresAt === null ||
+        session.expiresAt === undefined ||
+        session.expiresAt > now
+      ) continue;
+
+      delete state.sessions[chatId];
+      await saveRuntime();
+
+      if (session.timeoutAction === "expire") {
+        delete state.activeFlows[chatId];
+        await saveRuntime();
+        continue;
+      }
+
+      const targetFlowId = session.timeoutAction === "connect"
+        ? session.timeoutTargetFlowId
+        : session.flowId;
+      const flow = state.flows.find(item =>
+        item.id === targetFlowId && item.enabled
+      );
+      if (!flow) {
+        delete state.activeFlows[chatId];
+        await saveRuntime();
+        continue;
+      }
+
+      enqueueTimeout(
+        flow,
+        chatId,
+        session.timeoutAction === "connect" ? 0 : session.nextIndex
+      );
+    }
+  }
+
+  function enqueueTimeout(flow, chatId, nextIndex) {
+    const previous = state.queues.get(chatId) || Promise.resolve();
+
+    const message = {
+      id: `timeout-${chatId}-${Date.now()}`,
+      chatId,
+      body: "",
+      fromMe: false,
+      isGroup: chatId.endsWith("@g.us")
+    };
+
+    const next = previous
+      .then(() => executeFlow(flow, message, nextIndex, ""))
+      .catch(error => {
+        console.error("[WA Flow Timeout v2]", error);
+        updateBadge(`erro no tempo: ${error.message}`, "error");
+      })
+      .finally(() => {
+        if (state.queues.get(chatId) === next) {
+          state.queues.delete(chatId);
+        }
+      });
+
+    state.queues.set(chatId, next);
+  }
+
+  async function recordCampaignResponse(message) {
+    if (!isRealCampaignResponse(message)) return;
+    const respondedAt = normalizeMessageTimestamp(message.timestamp);
+    if (!respondedAt || respondedAt > Date.now() + 5 * 60000) return;
+    const responseMessageId = String(message.id || "");
+    if (
+      state.campaigns.some(campaign =>
+        campaign.recipients?.some(recipient =>
+          recipient.responseMessageId === responseMessageId
+        )
+      )
+    ) return;
+
+    const candidates = state.campaigns.flatMap(campaign => {
+      if (!["running", "paused", "completed"].includes(campaign.status)) return [];
+      return (campaign.recipients || [])
+        .map((recipient, index) => ({ campaign, recipient, index }))
+        .filter(({ recipient }) =>
+          recipientMatchesMessage(recipient, message) &&
+          Number(recipient.sentAt || 0) > 0 &&
+          Number(recipient.sentAt || 0) <= respondedAt
+        );
+    });
+    candidates.sort((left, right) =>
+      Number(right.recipient.sentAt || 0) - Number(left.recipient.sentAt || 0) ||
+      Number(right.campaign.createdAt || 0) - Number(left.campaign.createdAt || 0) ||
+      right.index - left.index
+    );
+
+    const match = candidates[0];
+    if (!match || match.recipient.respondedAt) return;
+    const { campaign, recipient } = match;
+    recipient.respondedAt = respondedAt;
+    recipient.responseMessageId = responseMessageId;
+    recipient.responseChatId = String(message.chatId || "");
+    if (!recipient.openedAt) recipient.openedAt = recipient.respondedAt;
+    campaign.opened = campaign.recipients.filter(item => item.openedAt).length;
+    campaign.responded = campaign.recipients.filter(item => item.respondedAt).length;
+    campaign.updatedAt = Date.now();
+    await saveCampaigns();
+  }
+
+  window.addEventListener("WF_INCOMING_ACTIVITY", event => {
+    recordCampaignResponse(event.detail || {}).catch(() => {});
+  });
+
+  window.addEventListener("WF_NEW_MESSAGE", event => {
+    enqueue(event.detail);
+  });
+
+  window.addEventListener("WF_MESSAGE_ACK", event => {
+    const { messageId, ack } = event.detail || {};
+    if (!messageId || Number(ack) < 3) return;
+    const campaign = state.campaigns.find(item =>
+      item.recipients?.some(recipient =>
+        recipient.messageIds?.includes(String(messageId)) && !recipient.openedAt
+      )
+    );
+    const recipient = campaign?.recipients?.find(item =>
+      item.messageIds?.includes(String(messageId))
+    );
+    if (!campaign || !recipient || recipient.openedAt) return;
+    recipient.openedAt = Date.now();
+    campaign.opened = campaign.recipients.filter(item => item.openedAt).length;
+    campaign.updatedAt = Date.now();
+    saveCampaigns();
+  });
+
+  function campaignExecutionPlan(campaign) {
+    const execution = campaign?.execution || {};
+    return {
+      requestId: String(execution.requestId || campaign?.requestId || ""),
+      flowId: String(execution.flowId || ""),
+      text: String(execution.text || ""),
+      texts: Array.isArray(execution.texts)
+        ? execution.texts.map(value => String(value || "")).filter(value => value.trim())
+        : [],
+      delaySeconds: Math.max(1, Math.floor(Number(execution.delaySeconds) || 5)),
+      varyDelay: Boolean(execution.varyDelay),
+      delayMinSeconds: Math.max(1, Math.floor(Number(execution.delayMinSeconds) || 5)),
+      delayMaxSeconds: Math.max(1, Math.floor(Number(execution.delayMaxSeconds) || 10))
+    };
+  }
+
+  function emitCampaignResult(campaign, ok = true, error = "") {
+    const requestId = campaignExecutionPlan(campaign).requestId;
+    if (!requestId) return;
+    window.dispatchEvent(new CustomEvent("WF_BULK_RESULT", {
+      detail: {
+        requestId,
+        campaignId: campaign.id,
+        ok,
+        cancelled: campaign.status === "interrupted",
+        paused: campaign.status === "paused",
+        sent: Number(campaign.sent || 0),
+        failed: Number(campaign.failed || 0),
+        errors: Array.isArray(campaign.errors) ? campaign.errors : [],
+        ...(error ? { error } : {})
+      }
+    }));
+  }
+
+  async function runPersistedCampaign(campaignId) {
+    let campaign = findCampaign(campaignId);
+    if (!campaign || campaign.status !== "running") return campaign;
+
+    const runToken = `run-${campaignId}-${Date.now()}-${Math.random()}`;
+    campaign.runnerId = engineInstanceId;
+    campaign.runToken = runToken;
+    campaign.runnerHeartbeatAt = Date.now();
+    campaign.startedAt ||= Date.now();
+    campaign.finishedAt = null;
+    campaign.pauseKind = "";
+    campaign.pauseReason = "";
+    campaign.interruptionReason = "";
+    updateCampaignNextSend(campaign);
+    await saveCampaigns();
+
+    const execution = campaignExecutionPlan(campaign);
+    const storedFlows = await chrome.storage.local.get("wfFlows");
+    state.flows = Array.isArray(storedFlows.wfFlows) ? storedFlows.wfFlows : state.flows;
+    const flow = campaign.sendType === "flow"
+      ? state.flows.find(item => String(item.id) === execution.flowId)
+      : null;
+
+    if (campaign.sendType === "flow" && (!flow || !flowHasSendableOutput(flow))) {
+      campaign.status = "paused";
+      campaign.pauseKind = "configuration";
+      campaign.pauseReason = !flow
+        ? "O fluxo desta campanha não foi encontrado. Restaure o fluxo e clique em Play novamente."
+        : "O fluxo desta campanha não possui bloco ativo para enviar.";
+      campaign.finishedAt = null;
+      await saveCampaigns();
+      return campaign;
+    }
+    if (
+      campaign.sendType !== "flow" &&
+      !execution.texts.length &&
+      !execution.text.trim()
+    ) {
+      campaign.status = "paused";
+      campaign.pauseKind = "configuration";
+      campaign.pauseReason =
+        "As mensagens desta campanha não estão mais disponíveis para a retomada.";
+      campaign.finishedAt = null;
+      await saveCampaigns();
+      return campaign;
+    }
+
+    const initialConnection = await campaignConnectionStatus();
+    if (!initialConnection.connected) {
+      await pauseCampaignForConnection(campaign);
+      return campaign;
+    }
+    const runAccountId = initialConnection.accountId;
+    campaign.runAccountId = runAccountId;
+    campaign.runnerHeartbeatAt = Date.now();
+    await saveCampaigns();
+
+    for (let index = 0; index < campaign.recipients.length; index++) {
+      campaign = findCampaign(campaignId);
+      if (
+        !campaign ||
+        campaign.status !== "running" ||
+        campaign.runnerId !== engineInstanceId ||
+        campaign.runToken !== runToken
+      ) break;
+
+      const recipient = campaign.recipients[index];
+      if (["sent", "failed"].includes(recipient.state)) continue;
+
+      const connection = await campaignConnectionStatus();
+      const accountChanged = Boolean(
+        runAccountId && connection.accountId !== runAccountId
+      );
+      if (!connection.connected || accountChanged) {
+        campaign = findCampaign(campaignId);
+        if (
+          campaign?.runnerId === engineInstanceId &&
+          campaign.runToken === runToken
+        ) {
+          await pauseCampaignForConnection(
+            campaign,
+            accountChanged
+              ? "A conta conectada ao WhatsApp mudou. A campanha foi pausada; clique em Play para continuar conscientemente pela nova conta."
+              : CONNECTION_PAUSE_MESSAGE
+          );
+        }
+        break;
+      }
+      campaign = findCampaign(campaignId);
+      if (
+        !campaign ||
+        campaign.status !== "running" ||
+        campaign.runnerId !== engineInstanceId ||
+        campaign.runToken !== runToken
+      ) break;
+
+      const contact = campaignContact(recipient);
+      const phone = String(recipient.phone || contact.phone || "").replace(/\D/g, "");
+      campaign.nextSend = recipient.name || phone || "Contato inválido";
+      campaign.runnerHeartbeatAt = Date.now();
+      await saveCampaigns();
+
+      if (!phone) {
+        recipient.state = "failed";
+        recipient.error = "Telefone inválido.";
+        campaign.errors ||= [];
+        if (campaign.errors.length < 10) {
+          campaign.errors.push({ phone: "sem número", error: recipient.error });
+        }
+        reconcileCampaign(campaign);
+        updateCampaignNextSend(campaign);
+        campaign.runnerHeartbeatAt = Date.now();
+        await saveCampaigns();
+        continue;
+      }
+
+      let chatId = `${phone}@c.us`;
+      const message = {
+        id: `bulk-${campaign.id}-${index}`,
+        chatId,
+        body: "",
+        fromMe: false,
+        isGroup: false,
+        contact
+      };
+      let pauseAfterAttempt = false;
+
+      try {
+        const resolved = await window.WFBridge.command("RESOLVE_CHAT", { chatId }, 30000);
+        chatId = String(resolved?.result?.chatId || chatId);
+        message.chatId = chatId;
+        recipient.chatId = chatId;
+        recipient.chatIds = [
+          chatId,
+          String(resolved?.result?.phoneChatId || ""),
+          String(resolved?.result?.lid || "")
+        ].filter(Boolean);
+        state.currentCampaignContext = {
+          campaignId: campaign.id,
+          recipientIndex: index,
+          phone,
+          chatId,
+          runnerId: engineInstanceId,
+          runToken
+        };
+
+        if (campaign.sendType === "flow") {
+          const cursor = recipient.flowCursor;
+          await refreshStoredFlows();
+          const resumeFlowId = String(cursor?.flowId || execution.flowId);
+          const resumeFlow = state.flows.find(item =>
+            String(item.id) === resumeFlowId
+          );
+          if (!resumeFlow) {
+            throw new Error("O fluxo do ponto de retomada não foi encontrado.");
+          }
+          await executeFlow(
+            resumeFlow,
+            message,
+            Math.max(0, Number(cursor?.blockIndex) || 0),
+            ""
+          );
+        } else {
+          const availableTexts = execution.texts.length
+            ? execution.texts
+            : [execution.text].filter(value => value.trim());
+          const selectedText = availableTexts[
+            Math.floor(Math.random() * availableTexts.length)
+          ] || "";
+          await sendText(
+            chatId,
+            interpolateContact(selectedText, message, chatId),
+            false,
+            true
+          );
+        }
+
+        if (!recipient.sentAt) {
+          throw new Error("O fluxo terminou sem confirmar nenhuma mensagem enviada.");
+        }
+        recipient.state = "sent";
+        delete recipient.error;
+      } catch (error) {
+        console.error("[WA Flow Bulk v2]", phone, error);
+        const pausedByControl = error?.code === "WF_CAMPAIGN_PAUSED";
+        const knownConnectionFailure = isConnectionFailure(error);
+        const connectionAfterError =
+          pausedByControl || knownConnectionFailure
+            ? null
+            : await campaignConnectionStatus();
+        const accountChanged = Boolean(
+          runAccountId &&
+          connectionAfterError &&
+          connectionAfterError.accountId !== runAccountId
+        );
+        const connectionLost =
+          !pausedByControl &&
+          (
+            knownConnectionFailure ||
+            !connectionAfterError?.connected ||
+            accountChanged
+          );
+        if (pausedByControl || connectionLost) {
+          if (recipient.flowCursor || !recipient.sentAt) {
+            recipient.state = "pending";
+          } else {
+            recipient.state = "sent";
+          }
+          delete recipient.error;
+          if (connectionLost) {
+            await pauseCampaignForConnection(
+              campaign,
+              accountChanged
+                ? "A conta conectada ao WhatsApp mudou. A campanha foi pausada; clique em Play para continuar conscientemente pela nova conta."
+                : CONNECTION_PAUSE_MESSAGE
+            );
+          }
+          pauseAfterAttempt = true;
+        } else if (recipient.sentAt) {
+          recipient.state = "sent";
+          delete recipient.error;
+        } else {
+          recipient.state = "failed";
+          recipient.error = error?.message || String(error);
+          campaign.errors ||= [];
+          if (campaign.errors.length < 10) {
+            campaign.errors.push({ phone, error: recipient.error });
+          }
+        }
+      } finally {
+        state.currentCampaignContext = null;
+        reconcileCampaign(campaign);
+        updateCampaignNextSend(campaign);
+        campaign.runnerHeartbeatAt = Date.now();
+        await saveCampaigns();
+      }
+
+      if (pauseAfterAttempt || campaign.status !== "running") break;
+
+      const hasAnotherPending = campaign.recipients
+        .slice(index + 1)
+        .some(item => !["sent", "failed"].includes(item.state));
+      if (!hasAnotherPending) continue;
+
+      const firstDelay = Math.min(
+        execution.delayMinSeconds,
+        execution.delayMaxSeconds
+      );
+      const secondDelay = Math.max(
+        execution.delayMinSeconds,
+        execution.delayMaxSeconds
+      );
+      const selectedDelay = execution.varyDelay
+        ? firstDelay + Math.floor(Math.random() * (secondDelay - firstDelay + 1))
+        : execution.delaySeconds;
+      let remainingDelay = selectedDelay * 1000;
+      while (
+        remainingDelay > 0 &&
+        campaign.status === "running" &&
+        campaign.runnerId === engineInstanceId &&
+        campaign.runToken === runToken
+      ) {
+        const step = Math.min(500, remainingDelay);
+        await sleep(step);
+        remainingDelay -= step;
+        campaign = findCampaign(campaignId);
+        if (!campaign) break;
+      }
+    }
+
+    campaign = findCampaign(campaignId);
+    if (!campaign) return null;
+    reconcileCampaign(campaign);
+    const ownsCampaign =
+      campaign.runnerId === engineInstanceId &&
+      campaign.runToken === runToken;
+    if (
+      ownsCampaign &&
+      campaign.status === "running" &&
+      campaign.processed >= Number(campaign.total || 0)
+    ) {
+      campaign.status = "completed";
+      campaign.finishedAt = Date.now();
+      campaign.nextSend = "";
+      campaign.pauseKind = "";
+      campaign.pauseReason = "";
+    }
+    campaign.runnerHeartbeatAt = Date.now();
+    await saveCampaigns();
+    return campaign;
+  }
+
+  function startCampaignRunner(campaignId) {
+    const existing = campaignRunners.get(campaignId);
+    if (existing) return existing;
+
+    const runner = runPersistedCampaign(campaignId)
+      .then(campaign => {
+        if (campaign && ["completed", "interrupted"].includes(campaign.status)) {
+          emitCampaignResult(campaign);
+        }
+        return campaign;
+      })
+      .catch(async error => {
+        const campaign = findCampaign(campaignId);
+        if (
+          campaign &&
+          campaign.status === "running" &&
+          campaign.runnerId === engineInstanceId
+        ) {
+          campaign.status = "paused";
+          campaign.pauseKind = "internal";
+          campaign.pauseReason =
+            "A campanha foi pausada por segurança após uma falha interna. Verifique o WhatsApp e clique em Play para tentar novamente.";
+          campaign.finishedAt = null;
+          updateCampaignNextSend(campaign);
+          try {
+            await saveCampaigns();
+          } catch {}
+        }
+        if (campaign) emitCampaignResult(campaign, false, error?.message || String(error));
+        return campaign;
+      })
+      .finally(() => {
+        if (campaignRunners.get(campaignId) === runner) {
+          campaignRunners.delete(campaignId);
+        }
+      });
+    campaignRunners.set(campaignId, runner);
+    return runner;
+  }
+
+  function resumeCampaignRunner(campaignId) {
+    const existing = campaignRunners.get(campaignId);
+    if (!existing) {
+      startCampaignRunner(campaignId);
+      return;
+    }
+    existing.finally(() => {
+      if (findCampaign(campaignId)?.status === "running") {
+        startCampaignRunner(campaignId);
+      }
+    });
+  }
+
+  async function resumeRecoverableCampaignsIfConnected() {
+    await stateReady;
+    const recoverable = state.campaigns.filter(campaign =>
+      campaign.status === "paused" &&
+      ["connection", "recovery"].includes(campaign.pauseKind) &&
+      campaign.processed < Number(campaign.total || 0)
+    );
+    if (!recoverable.length) return;
+
+    const connection = await campaignConnectionStatus();
+    if (!connection.connected || !connection.accountId) return;
+
+    const resumed = recoverable.filter(campaign =>
+      campaign.runAccountId && campaign.runAccountId === connection.accountId
+    );
+    if (!resumed.length) return;
+
+    resumed.forEach(campaign => {
+      campaign.status = "running";
+      campaign.runnerId = engineInstanceId;
+      campaign.runToken = "";
+      campaign.runnerHeartbeatAt = Date.now();
+      campaign.finishedAt = null;
+      campaign.pauseKind = "";
+      campaign.pauseReason = "";
+      campaign.interruptionReason = "";
+      campaign.updatedAt = Date.now();
+      updateCampaignNextSend(campaign);
+    });
+    await saveCampaigns();
+    resumed.forEach(campaign => startCampaignRunner(campaign.id));
+  }
+
+  function emitBulkControlResult(requestId, detail) {
+    if (!requestId) return;
+    window.dispatchEvent(new CustomEvent("WF_BULK_CONTROL_RESULT", {
+      detail: { requestId, ...detail }
+    }));
+  }
+
+  function handleBulkControl(detail = {}) {
+    const { requestId, campaignId: id, campaignIds, action } = detail;
+    if (action === "delete-many") {
+      const ids = new Set(
+        (Array.isArray(campaignIds) ? campaignIds : [])
+          .map(value => String(value))
+          .filter(Boolean)
+      );
+      if (!ids.size) {
+        emitBulkControlResult(requestId, { ok: false, error: "Nenhuma campanha informada." });
+        return;
+      }
+      state.campaigns = state.campaigns.filter(item =>
+        !ids.has(String(item.id)) ||
+        ["running", "paused"].includes(item.status)
+      );
+      saveCampaigns()
+        .then(() => emitBulkControlResult(requestId, { ok: true }))
+        .catch(error => emitBulkControlResult(requestId, {
+          ok: false,
+          error: error?.message || String(error)
+        }));
+      return;
+    }
+    if (action === "delete") {
+      state.campaigns = state.campaigns.filter(item => item.id !== id);
+      saveCampaigns()
+        .then(() => emitBulkControlResult(requestId, { ok: true }))
+        .catch(error => emitBulkControlResult(requestId, {
+          ok: false,
+          error: error?.message || String(error)
+        }));
+      return;
+    }
+    const campaign = findCampaign(id);
+    if (!campaign || !["running", "paused"].includes(campaign.status)) {
+      emitBulkControlResult(requestId, {
+        ok: false,
+        error: "A campanha ativa não foi encontrada."
+      });
+      return;
+    }
+    if (!["cancel", "pause", "resume"].includes(action)) {
+      emitBulkControlResult(requestId, { ok: false, error: "Controle de campanha inválido." });
+      return;
+    }
+    campaign.status = action === "cancel"
+      ? "interrupted"
+      : action === "pause"
+        ? "paused"
+        : "running";
+    if (action === "cancel") {
+      campaign.finishedAt = Date.now();
+      campaign.nextSend = "";
+      campaign.interruptionReason = "Campanha cancelada manualmente.";
+      campaign.pauseReason = "";
+      campaign.pauseKind = "";
+    } else if (action === "pause") {
+      campaign.finishedAt = null;
+      campaign.pauseKind = "manual";
+      campaign.pauseReason =
+        "Pausada manualmente. Clique em Play para continuar do próximo contato.";
+      campaign.interruptionReason = "";
+      updateCampaignNextSend(campaign);
+    } else {
+      campaign.runnerId = engineInstanceId;
+      campaign.runnerHeartbeatAt = Date.now();
+      campaign.finishedAt = null;
+      campaign.pauseKind = "";
+      campaign.pauseReason = "";
+      campaign.interruptionReason = "";
+      updateCampaignNextSend(campaign);
+    }
+    campaign.updatedAt = Date.now();
+    saveCampaigns().then(() => {
+      if (action === "resume") {
+        resumeCampaignRunner(campaign.id);
+      } else if (action === "cancel" && !campaignRunners.has(campaign.id)) {
+        emitCampaignResult(campaign);
+      }
+      emitBulkControlResult(requestId, {
+        ok: true,
+        campaignId: campaign.id,
+        status: campaign.status
+      });
+    }).catch(error => emitBulkControlResult(requestId, {
+      ok: false,
+      error: error?.message || String(error)
+    }));
+  }
+
+  window.addEventListener("WF_BULK_CONTROL", event => {
+    stateReady
+      .then(() => handleBulkControl(event.detail || {}))
+      .catch(error => {
+        console.error("[WA Flow Bulk Control]", error);
+        emitBulkControlResult(event.detail?.requestId, {
+          ok: false,
+          error: error?.message || String(error)
+        });
+      });
+  });
+
+  window.addEventListener("WF_CHAT_CONTROL", event => {
+    const { action, chatId, flowId } = event.detail || {};
+    if (!chatId) return;
+
+    if (action === "pause") {
+      state.pausedUntil[chatId] = Number.MAX_SAFE_INTEGER;
+      delete state.sessions[chatId];
+      saveRuntime();
+      return;
+    }
+
+    if (action === "resume") {
+      delete state.pausedUntil[chatId];
+      delete state.activeFlows[chatId];
+      saveRuntime();
+      return;
+    }
+
+    if (action === "cancel-flow") {
+      delete state.sessions[chatId];
+      delete state.activeFlows[chatId];
+      delete state.pausedUntil[chatId];
+      saveRuntime();
+      updateBadge();
+      return;
+    }
+
+    if (action === "advance-flow") {
+      const active = state.activeFlows[chatId];
+      if (!active?.flowId) return;
+      const flow = state.flows.find(item => String(item.id) === String(active.flowId));
+      if (!flow) return;
+
+      const waitingSession = state.sessions[chatId];
+      const nextIndex = waitingSession?.flowId === flow.id
+        ? Math.max(0, Number(waitingSession.nextIndex) || 0)
+        : Math.max(0, Number(active.currentIndex) + 1 || 1);
+
+      delete state.sessions[chatId];
+      delete state.pausedUntil[chatId];
+      state.activeFlows[chatId] = {
+        ...active,
+        runId: `superseded-${Date.now()}-${Math.random()}`
+      };
+      saveRuntime();
+
+      const message = {
+        id: `manual-advance-${chatId}-${Date.now()}`,
+        chatId,
+        body: "",
+        fromMe: false,
+        isGroup: chatId.endsWith("@g.us")
+      };
+      const next = Promise.resolve()
+        .then(() => executeFlow(flow, message, nextIndex, ""))
+        .catch(error => {
+          console.error("[WA Flow Manual Advance]", error);
+          updateBadge(`erro ao avançar: ${error.message}`, "error");
+        })
+        .finally(() => {
+          if (state.queues.get(chatId) === next) state.queues.delete(chatId);
+        });
+      state.queues.set(chatId, next);
+      return;
+    }
+
+    if (action === "start-flow") {
+      const flow = state.flows.find(item => item.id === flowId);
+      if (!flow) return;
+
+      const message = {
+        id: `manual-${chatId}-${Date.now()}`,
+        chatId,
+        body: "",
+        fromMe: false,
+        isGroup: chatId.endsWith("@g.us")
+      };
+
+      const previous = state.queues.get(chatId) || Promise.resolve();
+      const next = previous
+        .then(() => executeFlow(flow, message, 0, ""))
+        .catch(error => {
+          console.error("[WA Flow Manual v2]", error);
+          updateBadge(`erro no envio manual: ${error.message}`, "error");
+        })
+        .finally(() => {
+          if (state.queues.get(chatId) === next) state.queues.delete(chatId);
+        });
+      state.queues.set(chatId, next);
+    }
+  });
+
+  window.addEventListener("WF_BULK_START", event => {
+    const {
+      requestId,
+      name,
+      listName,
+      listId,
+      tagFilter,
+      contacts = [],
+      sendType,
+      flowId,
+      text,
+      texts = [],
+      delaySeconds = 5,
+      varyDelay = false,
+      delayMinSeconds = 5,
+      delayMaxSeconds = 10
+    } = event.detail || {};
+
+    (async () => {
+      await stateReady;
+      if (!Array.isArray(contacts) || !contacts.length) {
+        throw new Error("A campanha não possui contatos para enviar.");
+      }
+      if (state.campaigns.some(item => ["running", "paused"].includes(item.status))) {
+        throw new Error("Já existe uma campanha em execução ou pausada.");
+      }
+
+      const storedFlows = await chrome.storage.local.get("wfFlows");
+      state.flows = Array.isArray(storedFlows.wfFlows) ? storedFlows.wfFlows : state.flows;
+      const flow = sendType === "flow"
+        ? state.flows.find(item => String(item.id) === String(flowId))
+        : null;
+      const availableTexts = (Array.isArray(texts) ? texts : [text])
+        .map(value => String(value || ""))
+        .filter(value => value.trim());
+      if (sendType === "flow" && !flow) {
+        throw new Error("O fluxo selecionado não foi encontrado.");
+      }
+      if (sendType === "flow" && !flowHasSendableOutput(flow)) {
+        throw new Error("O fluxo selecionado não possui nenhum bloco ativo capaz de enviar mensagem.");
+      }
+      if (sendType !== "flow" && !availableTexts.length) {
+        throw new Error("A campanha não possui nenhuma mensagem para enviar.");
+      }
+
+      const id = campaignId();
+      const campaign = {
+        id,
+        runnerId: engineInstanceId,
+        runnerHeartbeatAt: Date.now(),
+        name: String(name || `Campanha ${new Date().toLocaleString("pt-BR")}`),
+        listName: String(listName || ""),
+        flowName: sendType === "flow" ? String(flow?.name || "") : "",
+        sendType,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        startedAt: Date.now(),
+        finishedAt: null,
+        status: "running",
+        total: contacts.length,
+        sent: 0,
+        failed: 0,
+        opened: 0,
+        responded: 0,
+        processed: 0,
+        lastSent: "",
+        nextSend: contacts[0]?.phone || "",
+        errors: [],
+        pauseKind: "",
+        pauseReason: "",
+        execution: {
+          version: 1,
+          requestId: String(requestId || ""),
+          listId: String(listId || ""),
+          tagFilter: String(tagFilter || ""),
+          flowId: String(flowId || ""),
+          text: String(text || availableTexts[0] || ""),
+          texts: availableTexts,
+          delaySeconds: Math.max(1, Math.floor(Number(delaySeconds) || 5)),
+          varyDelay: Boolean(varyDelay),
+          delayMinSeconds: Math.max(1, Math.floor(Number(delayMinSeconds) || 5)),
+          delayMaxSeconds: Math.max(1, Math.floor(Number(delayMaxSeconds) || 10))
+        },
+        recipients: contacts.map(contact => {
+          const savedContact = {
+            firstName: String(contact.firstName || ""),
+            lastName: String(contact.lastName || ""),
+            phone: String(contact.phone || ""),
+            tag: String(contact.tag || "")
+          };
+          return {
+            phone: savedContact.phone.replace(/\D/g, ""),
+            name: [savedContact.firstName, savedContact.lastName].filter(Boolean).join(" "),
+            contact: savedContact,
+            state: "pending",
+            sentAt: null,
+            chatId: "",
+            chatIds: [],
+            openedAt: null,
+            respondedAt: null,
+            responseMessageId: "",
+            responseChatId: "",
+            messageIds: []
+          };
+        })
+      };
+
+      updateCampaignNextSend(campaign);
+      state.campaigns.unshift(campaign);
+      await saveCampaigns();
+      window.dispatchEvent(new CustomEvent("WF_BULK_ACCEPTED", {
+        detail: { requestId, campaignId: id, ok: true }
+      }));
+      startCampaignRunner(id);
+    })().catch(error => {
+      window.dispatchEvent(new CustomEvent("WF_BULK_RESULT", {
+        detail: {
+          requestId,
+          ok: false,
+          sent: 0,
+          failed: 0,
+          error: error?.message || String(error)
+        }
+      }));
+    });
+  });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (changes.wfSettings) state.settings = changes.wfSettings.newValue || {};
+    if (changes.wfFlows) state.flows = changes.wfFlows.newValue || [];
+    if (changes.wfContactLists) {
+      state.contactLists = Array.isArray(changes.wfContactLists.newValue)
+        ? changes.wfContactLists.newValue
+        : [];
+    }
+    if (changes.wfCampaigns) {
+      const storedCampaigns = Array.isArray(changes.wfCampaigns.newValue)
+        ? changes.wfCampaigns.newValue
+        : [];
+      const localOwnedCampaigns = state.campaigns.filter(item =>
+        item.runnerId === engineInstanceId
+      );
+      const mergedCampaigns = storedCampaigns.map(stored => {
+        const local = localOwnedCampaigns.find(item => item.id === stored.id);
+        if (local) {
+          const localUpdatedAt = Number(local.updatedAt || 0);
+          const storedUpdatedAt = Number(stored.updatedAt || 0);
+          const ownershipChanged = stored.runnerId !== local.runnerId;
+          if (ownershipChanged && storedUpdatedAt >= localUpdatedAt) {
+            return stored;
+          }
+          if (localUpdatedAt >= storedUpdatedAt) return local;
+        }
+        return stored;
+      });
+      localOwnedCampaigns.forEach(local => {
+        if (!mergedCampaigns.some(stored => stored.id === local.id)) {
+          mergedCampaigns.unshift(local);
+        }
+      });
+      state.campaigns = mergedCampaigns.slice(0, 100);
+      storedCampaigns.forEach(storedCampaign => {
+        const localCampaign = state.campaigns.find(item => item.id === storedCampaign.id);
+        if (!localCampaign) return;
+        (storedCampaign.recipients || []).forEach((storedRecipient, index) => {
+          const localRecipient =
+            localCampaign.recipients?.[index] ||
+            (localCampaign.recipients || []).find(item =>
+              item.phone === storedRecipient.phone
+            );
+          if (!localRecipient) return;
+          if (storedRecipient.openedAt) localRecipient.openedAt = storedRecipient.openedAt;
+          if (storedRecipient.respondedAt) {
+            localRecipient.respondedAt = storedRecipient.respondedAt;
+            if (storedRecipient.responseMessageId) {
+              localRecipient.responseMessageId = storedRecipient.responseMessageId;
+            }
+            if (storedRecipient.responseChatId) {
+              localRecipient.responseChatId = storedRecipient.responseChatId;
+            }
+          }
+        });
+        localCampaign.opened = localCampaign.recipients.filter(item => item.openedAt).length;
+        localCampaign.responded = localCampaign.recipients.filter(item => item.respondedAt).length;
+      });
+    }
+    updateBadge();
+  });
+
+  const stateReady = loadState();
+  let timeoutSweep = Promise.resolve();
+  let campaignConnectionSweep = Promise.resolve();
+  async function pauseRunningCampaignIfDisconnected() {
+    await stateReady;
+    const campaign = state.campaigns.find(item =>
+      item.status === "running" && item.runnerId === engineInstanceId
+    );
+    if (!campaign) return;
+    const connection = await campaignConnectionStatus();
+    const accountChanged = Boolean(
+      campaign.runAccountId &&
+      connection.accountId !== campaign.runAccountId
+    );
+    if (connection.connected && !accountChanged) return;
+    await pauseCampaignForConnection(
+      campaign,
+      accountChanged
+        ? "A conta conectada ao WhatsApp mudou. A campanha foi pausada; clique em Play para continuar conscientemente pela nova conta."
+        : CONNECTION_PAUSE_MESSAGE
+    );
+  }
+  window.addEventListener("offline", () => {
+    campaignConnectionSweep = campaignConnectionSweep
+      .then(pauseRunningCampaignIfDisconnected)
+      .catch(() => {});
+  });
+  setInterval(() => {
+    timeoutSweep = timeoutSweep
+      .then(processTimeouts)
+      .catch(error => console.error("[WA Flow Timeout Sweep]", error));
+  }, 1000);
+  setInterval(() => {
+    campaignConnectionSweep = campaignConnectionSweep
+      .then(pauseRunningCampaignIfDisconnected)
+      .then(resumeRecoverableCampaignsIfConnected)
+      .catch(error => console.error("[WA Flow Campaign Connection]", error));
+  }, 2000);
+  setInterval(refreshCampaignReceipts, 5000);
+})();

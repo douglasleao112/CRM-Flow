@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WhatsApp Flow Builder</title>
+  <link rel="icon" type="image/png" href="icons/icon-32.png">
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .field-label-with-badge { display: flex; align-items: center; gap: 8px; }
+    .bulk-count-badge {
+      display: inline-flex; align-items: center; min-height: 20px; padding: 1px 7px;
+      border-radius: 999px; background: #e9f7f2; color: #12805c;
+      font-size: 11px; font-weight: 700; line-height: 1; white-space: nowrap;
+    }
+    .bulk-selected-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+    .bulk-selected-tags:empty { display: none; }
+    .bulk-selected-chip {
+      display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px;
+      border-radius: 999px; background: #e9f7f2; color: #126f54;
+      font-size: 11px; font-weight: 700;
+    }
+    .bulk-selected-chip button {
+      display: grid; place-items: center; width: 16px; height: 16px; padding: 0;
+      border: 0; border-radius: 50%; background: #cfeee3; color: #126f54;
+      cursor: pointer; font: inherit; line-height: 1;
+    }
+    .bulk-selected-chip button:hover { background: #b9e4d5; }
+    .bulk-tag-helper { margin-top: 5px; color: #78848c; font-size: 11px; }
+  </style>
+</head>
+<body class="workflow-page">
+  <header class="workflow-topbar">
+    <div class="brand-area">
+      <img src="icons/icon-32.png" alt="" class="brand-icon">
+      <div>
+        <strong>WhatsApp Flow</strong>
+        <span>Editor visual de automações</span>
+      </div>
+    </div>
+
+    <nav class="app-section-nav" aria-label="Seções do WhatsFlow">
+      <div class="app-backup-actions" role="group" aria-label="Backup completo da ferramenta">
+        <button id="fullBackupExportBtn" class="app-backup-button" type="button" title="Baixar backup completo" aria-label="Baixar backup completo">↓</button>
+        <button id="fullBackupImportBtn" class="app-backup-button" type="button" title="Importar backup completo" aria-label="Importar backup completo">↑</button>
+        <input id="fullBackupImportFile" type="file" accept="application/json,.json" hidden>
+      </div>
+      <button type="button" class="app-section-tab active" data-app-section="flows">Fluxos</button>
+      <button type="button" class="app-section-tab" data-app-section="contacts">Contatos</button>
+      <button type="button" class="app-section-tab" data-app-section="bulk">Disparo</button>
+    </nav>
+
+  </header>
+
+  <main id="flowsSection" class="workflow-shell app-section">
+    <aside class="flows-sidebar">
+      <div class="sidebar-title">
+        <div>
+          <strong>Meus fluxos</strong>
+          <span id="flowTotal">0 fluxos</span>
+        </div>
+        <div class="sidebar-title-actions">
+          <button id="newFlowGroup" class="new-flow-group-button" type="button" title="Novo grupo" aria-label="Criar grupo de fluxos"><span aria-hidden="true">+</span> Grupo</button>
+          <button id="newFlow" class="icon-button primary-small" type="button" title="Novo fluxo" aria-label="Criar fluxo">+</button>
+        </div>
+      </div>
+
+      <div id="flowList" class="workflow-flow-list"></div>
+    </aside>
+
+    <section class="workflow-main">
+      <div class="workflow-actions workflow-main-actions">
+        <button id="exportBtn" class="workflow-btn secondary">Exportar</button>
+        <button id="importBtn" class="workflow-btn secondary">Importar</button>
+        <input id="importFile" class="hidden" type="file" accept=".json,application/json">
+        <button id="saveBtn" class="workflow-btn primary">Salvar</button>
+      </div>
+
+      <div id="emptyState" class="workflow-empty">
+        <div class="empty-icon">⚡</div>
+        <strong>Crie ou selecione um fluxo</strong>
+        <span>Monte sua automação conectando os blocos na sequência desejada.</span>
+      </div>
+
+      <div id="flowEditor" class="hidden">
+        <div class="flow-header-card">
+          <div class="flow-title-row">
+            <input id="flowName" class="flow-name-input" placeholder="Nome do fluxo">
+            <label class="workflow-switch">
+              <input id="flowEnabled" type="checkbox">
+              <span></span>
+              <b>Fluxo ativo</b>
+            </label>
+          </div>
+
+          <div class="trigger-grid">
+            <label class="form-check trigger-enabled-option">
+              <input id="triggersEnabled" class="form-check-input" type="checkbox">
+              <span class="form-check-label">Ativar gatilhos automáticos</span>
+            </label>
+            <div id="triggerRows" class="trigger-rows"></div>
+            <button id="addTrigger" class="add-trigger-btn" type="button">+ Gatilho</button>
+            <label class="form-check workflow-once">
+              <input id="oncePerChat" class="form-check-input" type="checkbox">
+              <span class="form-check-label">Executar somente uma vez por conversa</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="flow-metrics">
+          <div class="flow-metric-card">
+            <span>Disparos</span>
+            <strong id="metricStarts">0</strong>
+          </div>
+
+          <div class="flow-metric-card">
+            <span>Conclusões</span>
+            <strong id="metricCompletions">0</strong>
+          </div>
+
+          <div class="flow-metric-card">
+            <span>Taxa de conclusão</span>
+            <strong id="metricCompletionRate">0%</strong>
+          </div>
+
+          <div class="flow-metric-card">
+            <span>Respostas</span>
+            <strong id="metricResponses">0</strong>
+          </div>
+
+          <div class="flow-metric-card">
+            <span>Taxa de respostas</span>
+            <strong id="metricResponseRate">0%</strong>
+          </div>
+
+          <button id="resetMetrics" class="reset-metrics-btn" type="button">
+            Zerar métricas
+          </button>
+        </div>
+
+        <div class="workflow-toolbar">
+          <div>
+            <strong>Workflow</strong>
+            <span>Arraste os blocos para reorganizar</span>
+          </div>
+          <button id="openLibrary" class="workflow-btn primary">+ Adicionar bloco</button>
+        </div>
+
+        <div class="workflow-canvas">
+          <div class="trigger-node">
+            <div class="node-icon trigger">⚡</div>
+            <div>
+              <strong>Gatilho de entrada</strong>
+              <span id="triggerSummary">Mensagem contém uma palavra</span>
+            </div>
+          </div>
+
+          <div class="workflow-connector"></div>
+          <div id="blocks" class="workflow-nodes"></div>
+
+          <button id="addEndBlock" class="add-end-node">+ Adicionar próximo bloco</button>
+        </div>
+      </div>
+    </section>
+
+    <aside id="blockLibrary" class="block-library hidden">
+      <div class="library-header">
+        <div>
+          <strong id="blockLibraryTitle">Adicionar bloco</strong>
+          <span id="blockLibraryDescription">Clique para adicionar ao final ou arraste para uma posição</span>
+        </div>
+        <button id="closeLibrary" class="icon-button" type="button" aria-label="Fechar menu de funções">×</button>
+      </div>
+
+      <div class="library-search">
+        <input id="blockSearch" placeholder="Pesquisar bloco">
+      </div>
+
+      <div class="library-grid">
+        <button class="library-item" data-add="text">
+          <img src="block-icons/text.png" alt="">
+          <span><strong>Texto</strong><small>Enviar mensagem escrita</small></span>
+        </button>
+        <button class="library-item" data-add="image">
+          <img src="block-icons/image.png" alt="">
+          <span><strong>Imagem</strong><small>Enviar imagem com legenda</small></span>
+        </button>
+        <button class="library-item" data-add="video">
+          <img src="block-icons/video.png" alt="">
+          <span><strong>Vídeo</strong><small>Enviar arquivo de vídeo</small></span>
+        </button>
+        <button class="library-item" data-add="audio">
+          <img src="block-icons/audio.png" alt="">
+          <span><strong>Áudio</strong><small>Enviar mensagem de voz</small></span>
+        </button>
+        <button class="library-item" data-add="wait">
+          <img src="block-icons/wait.png" alt="">
+          <span><strong>Espera</strong><small>Aguardar antes de continuar</small></span>
+        </button>
+        <button class="library-item" data-add="await">
+          <img src="block-icons/await.png" alt="">
+          <span><strong>Aguardar resposta</strong><small>Esperar o contato responder</small></span>
+        </button>
+        <button class="library-item" data-add="condition">
+          <img src="block-icons/condition.png" alt="">
+          <span><strong>Condição</strong><small>Criar caminhos diferentes</small></span>
+        </button>
+        <button class="library-item" data-add="pause">
+          <img src="block-icons/pause.png" alt="">
+          <span><strong>Pausar automação</strong><small>Interromper para atendimento</small></span>
+        </button>
+        <button class="library-item" data-add="flow">
+          <img src="block-icons/connect-flow.png" alt="">
+          <span><strong>Conectar a outro fluxo</strong><small>Continuar em outro fluxo</small></span>
+        </button>
+        <button class="library-item" data-add="label">
+          <img src="block-icons/label.svg" alt="">
+          <span><strong>Aplicar etiqueta</strong><small>Adicionar etiqueta do WhatsApp</small></span>
+        </button>
+        <button class="library-item" data-add="removeLabel" type="button">
+          <img src="block-icons/remove-label.svg" alt="">
+          <span><strong>Remover etiqueta</strong><small>Retirar uma etiqueta do contato</small></span>
+        </button>
+      </div>
+    </aside>
+  </main>
+
+  <section id="kanbanSection" class="app-section kanban-section hidden" hidden>
+    <div class="kanban-header">
+      <div>
+        <h1>Kanban</h1>
+        <p>Organize seus contatos por etapa e acompanhe cada oportunidade.</p>
+      </div>
+      <div class="kanban-header-actions">
+        <label class="kanban-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="kanbanSearch" type="search" placeholder="Buscar contato ou telefone">
+        </label>
+        <select id="kanbanBoardSelect" aria-label="Selecionar quadro"></select>
+        <button id="kanbanNewBoard" class="workflow-btn secondary" type="button">+ Quadro</button>
+        <button id="kanbanImportContacts" class="workflow-btn secondary" type="button">Importar lista</button>
+        <button id="kanbanSyncWhatsapp" class="workflow-btn secondary kanban-sync" type="button">↻ WhatsApp</button>
+        <button id="kanbanAddCard" class="workflow-btn primary" type="button">+ Contato</button>
+      </div>
+    </div>
+    <div class="kanban-board-toolbar">
+      <div>
+        <strong id="kanbanBoardName">Funil de vendas</strong>
+        <span id="kanbanBoardTotal">0 contatos</span>
+      </div>
+      <div>
+        <button id="kanbanRenameBoard" type="button">Renomear</button>
+        <button id="kanbanDeleteBoard" class="danger" type="button">Excluir quadro</button>
+        <button id="kanbanAddColumn" type="button">+ Nova etapa</button>
+      </div>
+    </div>
+    <div id="kanbanBoard" class="kanban-board" aria-label="Quadro Kanban"></div>
+  </section>
+
+  <div id="kanbanConversationModal" class="kanban-conversation-modal hidden" role="dialog" aria-modal="true" aria-labelledby="kanbanConversationName">
+    <div class="kanban-conversation-dialog">
+      <header>
+        <div class="kanban-conversation-contact">
+          <span id="kanbanConversationAvatar" class="kanban-avatar"></span>
+          <div><strong id="kanbanConversationName"></strong><span id="kanbanConversationPhone"></span></div>
+        </div>
+        <button id="kanbanCloseConversation" type="button" aria-label="Fechar">×</button>
+      </header>
+      <div id="kanbanConversationMessages" class="kanban-conversation-messages"></div>
+      <footer>
+        <button id="kanbanOpenWhatsapp" class="workflow-btn primary" type="button">Abrir no WhatsApp</button>
+      </footer>
+    </div>
+  </div>
+
+  <section id="contactsSection" class="app-section app-module hidden">
+    <div class="module-header">
+      <div>
+        <h1>Listas de contatos</h1>
+        <p>Importe contatos e use os campos como variáveis nas mensagens.</p>
+      </div>
+    </div>
+
+    <div class="module-card contact-import-card">
+      <div class="node-field">
+        <label>Nome da lista</label>
+        <input id="contactListName" placeholder="Ex.: Clientes de julho">
+      </div>
+      <div class="node-field">
+        <label>Planilha de contatos</label>
+        <input id="contactFile" type="file" accept=".csv,text/csv">
+      </div>
+      <div class="contact-import-actions">
+        <button id="importContacts" class="workflow-btn primary" type="button">Importar lista</button>
+        <a class="workflow-btn secondary download-template" href="assets/modelo-contatos.csv" download>Baixar modelo</a>
+      </div>
+      <span id="contactImportFeedback" class="module-feedback"></span>
+    </div>
+
+    <div class="module-grid">
+      <aside class="module-card contact-lists-panel">
+        <div class="module-card-title">
+          <strong>Listas salvas</strong>
+          <span id="contactListCount">0</span>
+        </div>
+        <div id="contactLists" class="contact-lists"></div>
+      </aside>
+      <div class="module-card contacts-table-panel">
+        <div class="module-card-title">
+          <strong id="selectedContactListName" class="editable-list-name" title="Clique para editar">Selecione uma lista</strong>
+          <div class="contact-table-actions">
+            <select id="contactTagFilter" class="hidden" aria-label="Filtrar por etiqueta">
+              <option value="">Todas as etiquetas</option>
+            </select>
+            <button id="addManualContact" class="contact-add-button hidden" type="button">+ Contato</button>
+          </div>
+        </div>
+        <div class="contacts-table-wrap">
+          <table class="contacts-table">
+            <thead><tr><th>Nome</th><th>Sobrenome</th><th>Telefone</th><th>Etiqueta</th><th class="contact-action-heading"></th></tr></thead>
+            <tbody id="contactsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="bulkSection" class="app-section app-module hidden">
+    <div class="module-header">
+      <div>
+        <h1>Disparo em massa</h1>
+        <p>Escolha uma lista salva, uma etiqueta do WhatsApp ou todos os contatos e envie um fluxo ou uma mensagem criada na hora.</p>
+      </div>
+    </div>
+
+    <div class="module-card bulk-form">
+      <div class="node-field full">
+        <label>Nome da campanha</label>
+        <input id="bulkCampaignName" type="text" maxlength="80" placeholder="Ex.: Leads 24/07 — Consultoria">
+      </div>
+      <div class="bulk-config-row full">
+        <div class="node-field full">
+          <label class="field-label-with-badge">Origem dos contatos <span id="bulkContactCountBadge" class="bulk-count-badge">0 contatos</span></label>
+          <select id="bulkContactList"><option value="">Selecione uma origem</option></select>
+        </div>
+      </div>
+      <div id="bulkAdvancedFilters" class="bulk-tag-rules-panel full hidden">
+        <div class="bulk-tag-rules-heading">
+          <div>
+            <h2>Regras de etiquetas</h2>
+            <p>Defina quem recebe e quem fica de fora do disparo.</p>
+          </div>
+          <button id="bulkAddTagRule" class="bulk-add-tag-rule" type="button">+ Regra</button>
+        </div>
+        <div class="bulk-tag-rules-counts" aria-live="polite">
+          <span>Incluir <span id="bulkTagSelectionBadge" class="bulk-count-badge">0 selecionadas</span></span>
+          <span>Excluir <span id="bulkExcludeSelectionBadge" class="bulk-count-badge bulk-count-badge-danger">0 etiquetas</span></span>
+        </div>
+        <div id="bulkTagRules" class="bulk-tag-rules" role="group" aria-label="Regras de etiquetas"></div>
+        <div id="bulkIncludeModeWrap" class="bulk-include-mode hidden">
+          <div class="bulk-include-mode-label">Quando houver mais de uma regra para incluir:</div>
+          <div class="bulk-match-options" role="group" aria-label="Combinação das etiquetas incluídas">
+            <button type="button" data-bulk-match="any" class="active" aria-pressed="true">Qualquer uma <small>OU</small></button>
+            <button type="button" data-bulk-match="all" aria-pressed="false">Todas juntas <small>E</small></button>
+          </div>
+        </div>
+        <div id="bulkTagHelper" class="bulk-tag-helper">Adicione uma etiqueta para incluir contatos. Use “Excluir” em outra regra para retirar quem tiver essa etiqueta.</div>
+      </div>
+      <div class="bulk-config-row full">
+        <div class="node-field">
+          <label>Tipo de envio</label>
+          <select id="bulkSendType">
+            <option value="flow">Fluxo existente</option>
+            <option value="message">Mensagem feita na hora</option>
+          </select>
+        </div>
+        <div id="bulkFlowField" class="node-field">
+          <label>Fluxo</label>
+          <select id="bulkFlow"><option value="">Selecione um fluxo</option></select>
+        </div>
+      </div>
+      <div id="bulkMessageField" class="node-field full hidden">
+        <div class="bulk-message-heading">
+          <label>Mensagem</label>
+          <div id="bulkVariablesMenu" class="bulk-variable-buttons" aria-label="Variáveis da mensagem">
+            <button type="button" data-bulk-variable="{nome}">{nome}</button>
+            <button type="button" data-bulk-variable="{sobrenome}">{sobrenome}</button>
+            <button type="button" data-bulk-variable="{telefone}">{telefone}</button>
+            <button type="button" data-bulk-variable="{etiqueta}">{etiqueta}</button>
+          </div>
+        </div>
+        <div id="bulkMessageVariations" class="bulk-message-variations">
+          <div class="bulk-message-variation">
+            <div class="bulk-message-variation-head hidden">
+              <span>Mensagem</span>
+              <button type="button" data-remove-bulk-message class="hidden" aria-label="Remover variação">×</button>
+            </div>
+            <textarea id="bulkMessage" data-bulk-message placeholder="Olá {nome}, temos uma novidade para você."></textarea>
+          </div>
+        </div>
+        <button id="addBulkMessageVariation" class="add-bulk-variation" type="button">+ Variação</button>
+      </div>
+      <div class="node-field bulk-delay-field full">
+        <div class="bulk-delay-heading">
+          <label>Intervalo entre contatos (segundos)</label>
+          <button id="bulkToggleDelay" class="wait-interval-toggle" type="button">Variar intervalo</button>
+        </div>
+        <div id="bulkFixedDelay">
+          <input id="bulkDelay" type="number" min="1" max="3600" value="5">
+        </div>
+        <div id="bulkRangeDelay" class="bulk-delay-range hidden">
+          <div>
+            <label for="bulkDelayMin">Mínimo</label>
+            <input id="bulkDelayMin" type="number" min="1" max="3600" value="5">
+          </div>
+          <div>
+            <label for="bulkDelayMax">Máximo</label>
+            <input id="bulkDelayMax" type="number" min="1" max="3600" value="10">
+          </div>
+        </div>
+      </div>
+      <div class="bulk-summary full">
+        <strong id="bulkRecipientCount" aria-live="polite">0 contatos receberão</strong>
+        <span id="bulkFilterRule">Revise a lista e o conteúdo antes de iniciar.</span>
+        <div id="bulkFilterBreakdown" class="bulk-filter-breakdown"></div>
+      </div>
+      <details id="bulkRecipientPreview" class="bulk-recipient-preview full">
+        <summary id="bulkRecipientPreviewSummary">Ver destinatários (0)</summary>
+        <div id="bulkRecipientPreviewList" class="bulk-recipient-preview-list" role="list"></div>
+      </details>
+      <button id="startBulkSend" class="workflow-btn primary full" type="button">Iniciar disparo</button>
+      <div id="bulkFeedback" class="module-feedback full"></div>
+    </div>
+
+    <div id="bulkCampaignPanel" class="module-card campaign-panel hidden">
+      <div class="campaign-panel-head">
+        <div>
+          <strong id="campaignActiveName">Campanha</strong>
+          <span id="campaignActiveDate"></span>
+        </div>
+        <div class="campaign-execution">
+          <span id="campaignStatusBadge" class="campaign-status">Em execução</span>
+          <button id="campaignEditMessages" class="campaign-edit-messages hidden" type="button"
+            title="Editar campanha" aria-label="Editar campanha"
+            aria-haspopup="dialog" aria-controls="campaignMessageModal">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="m10.8 2.2 3 3-7.7 7.7-3.7.7.7-3.7 7.7-7.7Z"></path>
+              <path d="m9.6 3.4 3 3"></path>
+            </svg>
+            <span>Editar campanha</span>
+          </button>
+          <button id="campaignPlayPause" type="button" title="Pausar campanha" aria-label="Pausar campanha">Ⅱ</button>
+          <button id="campaignCancel" class="campaign-cancel hidden" type="button"
+            title="Cancelar campanha" aria-label="Cancelar campanha">×</button>
+          <button id="campaignDelete" class="campaign-delete hidden" type="button"
+            title="Excluir campanha" aria-label="Excluir campanha">🗑</button>
+        </div>
+      </div>
+      <div class="campaign-progress"><span id="campaignProgressBar"></span></div>
+      <div id="campaignPauseReason" class="campaign-pause-reason hidden"></div>
+      <div class="campaign-current">
+        <div><span>Último enviado</span><strong id="campaignLastSent">—</strong></div>
+        <div><span>Próximo envio</span><strong id="campaignNextSend">—</strong></div>
+      </div>
+      <div class="campaign-stats">
+        <button id="campaignSentMetric" class="campaign-contacts-trigger" type="button"
+          title="Ver contatos enviados" aria-haspopup="dialog"
+          aria-controls="campaignContactsModal">
+          <span>Enviados</span><strong id="campaignSent">0</strong>
+        </button>
+        <button id="campaignFailureMetric" class="campaign-contacts-trigger" type="button"
+          title="Ver contatos que não foram enviados" aria-haspopup="dialog"
+          aria-controls="campaignContactsModal">
+          <span>Falhas</span><strong id="campaignFailed">0</strong>
+        </button>
+        <div><span>Taxa de aproveitamento</span><strong id="campaignSuccessRate">0%</strong></div>
+        <div><span>Conclusão</span><strong id="campaignCompletion">0%</strong></div>
+        <button id="campaignOpenedMetric" class="campaign-contacts-trigger" type="button"
+          title="Ver contatos que abriram" aria-haspopup="dialog"
+          aria-controls="campaignContactsModal">
+          <span>Abertos</span><strong id="campaignOpened">0</strong>
+        </button>
+        <div><span>Taxa de abertura</span><strong id="campaignOpenRate">0%</strong></div>
+        <button id="campaignRespondedMetric" class="campaign-contacts-trigger" type="button"
+          title="Ver contatos que responderam" aria-haspopup="dialog"
+          aria-controls="campaignContactsModal">
+          <span>Respondidos</span><strong id="campaignResponded">0</strong>
+        </button>
+        <div><span>Taxa de resposta</span><strong id="campaignResponseRate">0%</strong></div>
+      </div>
+    </div>
+
+    <div class="module-card campaign-history-card">
+      <div class="module-card-title">
+        <strong>Histórico de campanhas</strong>
+        <div class="campaign-history-tools">
+          <span id="campaignHistoryCount">0</span>
+          <button id="importCampaignHistory" type="button" title="Importar histórico em CSV"
+            aria-label="Importar histórico em CSV">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 2v9M4.5 7.5 8 11l3.5-3.5M3 14h10"></path>
+            </svg>
+          </button>
+          <button id="exportCampaignHistory" type="button" title="Exportar histórico em CSV"
+            aria-label="Exportar histórico em CSV">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 14V5M4.5 8.5 8 5l3.5 3.5M3 2h10"></path>
+            </svg>
+          </button>
+          <button id="deleteCampaignHistory" class="campaign-history-clear" type="button"
+            title="Excluir todo o histórico" aria-label="Excluir todo o histórico">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6l.7-9.5M6.5 6.5v4.5M9.5 6.5v4.5"></path>
+            </svg>
+          </button>
+          <input id="campaignHistoryFile" class="hidden" type="file" accept=".csv,text/csv">
+        </div>
+      </div>
+      <div id="campaignHistoryFeedback" class="campaign-history-feedback"></div>
+      <div id="campaignHistory" class="campaign-history">
+        <div class="module-empty">Nenhuma campanha realizada.</div>
+      </div>
+    </div>
+  </section>
+
+  <div id="campaignContactsModal" class="campaign-contacts-modal hidden" role="dialog"
+    aria-modal="true" aria-labelledby="campaignContactsTitle"
+    aria-describedby="campaignContactsCount">
+    <div class="campaign-contacts-dialog" tabindex="-1">
+      <div class="campaign-contacts-head">
+        <div>
+          <strong id="campaignContactsTitle">Contatos da campanha</strong>
+          <span id="campaignContactsCount" aria-live="polite" aria-atomic="true">0 contatos</span>
+        </div>
+        <button id="closeCampaignContacts" type="button" title="Fechar"
+          aria-label="Fechar lista de contatos">×</button>
+      </div>
+      <label class="campaign-contacts-search" for="campaignContactsSearch">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5"></circle>
+          <path d="m10.5 10.5 3 3"></path>
+        </svg>
+        <input id="campaignContactsSearch" type="search"
+          placeholder="Buscar por nome ou telefone" autocomplete="off"
+          aria-label="Buscar contato por nome ou telefone"
+          aria-controls="campaignContactsList">
+      </label>
+      <div id="campaignContactsList" class="campaign-contacts-list" role="list"></div>
+    </div>
+  </div>
+
+  <div id="campaignMessageModal" class="campaign-contacts-modal hidden" role="dialog"
+    aria-modal="true" aria-labelledby="campaignMessageModalTitle"
+    aria-describedby="campaignMessageModalHint">
+    <div class="campaign-contacts-dialog campaign-message-dialog" tabindex="-1">
+      <div class="campaign-contacts-head">
+        <div>
+          <strong id="campaignMessageModalTitle">Editar campanha</strong>
+          <span id="campaignMessageModalHint">As alterações valerão somente para os próximos contatos pendentes.</span>
+        </div>
+        <button id="closeCampaignMessageModal" type="button" title="Fechar"
+          aria-label="Fechar editor da campanha">×</button>
+      </div>
+      <div class="campaign-edit-body">
+        <div id="campaignEditMessageSection" class="node-field full hidden">
+          <div class="bulk-message-heading">
+            <label>Mensagens</label>
+            <div class="bulk-variable-buttons" aria-label="Variáveis da mensagem">
+              <button type="button" data-campaign-variable="{nome}">{nome}</button>
+              <button type="button" data-campaign-variable="{sobrenome}">{sobrenome}</button>
+              <button type="button" data-campaign-variable="{telefone}">{telefone}</button>
+              <button type="button" data-campaign-variable="{etiqueta}">{etiqueta}</button>
+            </div>
+          </div>
+          <div id="campaignMessageFields" class="campaign-message-fields"></div>
+          <button id="addCampaignMessageVariation" class="add-bulk-variation" type="button">+ Variação</button>
+        </div>
+        <div class="node-field full">
+          <div class="bulk-delay-heading">
+            <label>Intervalo entre contatos (segundos)</label>
+            <button id="campaignEditToggleDelay" class="wait-interval-toggle" type="button">Variar intervalo</button>
+          </div>
+          <div id="campaignEditFixedDelay">
+            <input id="campaignEditDelay" type="number" min="1" max="3600" value="5">
+          </div>
+          <div id="campaignEditRangeDelay" class="bulk-delay-range hidden">
+            <div>
+              <label for="campaignEditDelayMin">Mínimo</label>
+              <input id="campaignEditDelayMin" type="number" min="1" max="3600" value="5">
+            </div>
+            <div>
+              <label for="campaignEditDelayMax">Máximo</label>
+              <input id="campaignEditDelayMax" type="number" min="1" max="3600" value="10">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="campaign-message-editor-footer">
+        <span id="campaignMessageFeedback" role="status" aria-live="polite"></span>
+        <div>
+          <button id="cancelCampaignMessageEdit" type="button">Cancelar</button>
+          <button id="saveCampaignMessageEdit" class="primary" type="button">Salvar campanha</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="message-formatting.js"></script>
+  <script src="editor.js"></script>
+  <script src="contacts.js"></script>
+</body>
+</html>

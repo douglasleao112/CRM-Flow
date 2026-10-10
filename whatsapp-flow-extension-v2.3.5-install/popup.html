@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WhatsApp Flow Builder</title>
+  <link rel="icon" type="image/png" href="icons/icon-32.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup">
+  <main>
+    <div class="popup-title-row">
+      <h1>WhatsFlow</h1>
+      <button id="enabled" class="popup-master-switch loading" type="button"
+        aria-pressed="false" aria-busy="true" aria-label="Carregando automações" disabled>
+        <span class="popup-master-track" aria-hidden="true">
+          <span class="popup-master-thumb"></span>
+        </span>
+      </button>
+    </div>
+    <nav class="popup-tabs" role="tablist" aria-label="Recursos do WhatsFlow">
+      <button
+        id="flowsTab"
+        class="popup-tab active"
+        type="button"
+        role="tab"
+        aria-selected="true"
+        aria-controls="flowsPanel"
+      >Fluxos</button>
+      <button
+        id="extractTab"
+        class="popup-tab"
+        type="button"
+        role="tab"
+        aria-selected="false"
+        aria-controls="extractPanel"
+      >Extrair números</button>
+    </nav>
+
+    <div id="flowsPanel" class="popup-panel" role="tabpanel" aria-labelledby="flowsTab">
+      <section class="popup-flows">
+        <div class="popup-flows-head">
+          <strong>Fluxos</strong>
+          <span id="flowCount" class="flow-count">0</span>
+        </div>
+        <div id="flowListPopup" class="popup-flow-list">
+          <div class="popup-empty">Carregando fluxos…</div>
+        </div>
+      </section>
+      <button id="openEditor" class="primary popup-wide-button">Abrir WhatsFlow</button>
+    </div>
+
+    <section
+      id="extractPanel"
+      class="popup-panel popup-extractor"
+      role="tabpanel"
+      aria-labelledby="extractTab"
+      hidden
+    >
+      <div class="extract-source-tabs" role="radiogroup" aria-label="Origem dos contatos">
+        <button
+          class="extract-source-tab active"
+          type="button"
+          data-extract-source="groups"
+          aria-pressed="true"
+        >Grupos</button>
+        <button
+          class="extract-source-tab"
+          type="button"
+          data-extract-source="labels"
+          aria-pressed="false"
+        >Etiquetas</button>
+      </div>
+
+      <label class="extract-search" for="extractionSearch">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="m20 20-4-4"></path>
+        </svg>
+        <input
+          id="extractionSearch"
+          type="search"
+          placeholder="Buscar grupos"
+          autocomplete="off"
+          spellcheck="false"
+        >
+      </label>
+
+      <div class="extract-toolbar">
+        <label class="extract-select-all">
+          <input id="extractSelectAll" type="checkbox">
+          <span>Selecionar todos</span>
+        </label>
+        <button
+          id="reloadExtractionSources"
+          class="extract-icon-button"
+          type="button"
+          title="Atualizar lista"
+          aria-label="Atualizar lista"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 6v5h-5M4 18v-5h5M6.1 9A7 7 0 0 1 18 6l2 5M17.9 15A7 7 0 0 1 6 18l-2-5"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div id="extractionSourceList" class="extract-source-list">
+        <div class="popup-empty">Abra o WhatsApp Web para carregar os grupos.</div>
+      </div>
+
+      <label id="extractionTagRow" class="extract-tag-field" for="extractionTag">
+        <span>Etiqueta dos contatos</span>
+        <input
+          id="extractionTag"
+          type="text"
+          maxlength="80"
+          placeholder="Ex.: Leads de julho"
+          autocomplete="off"
+        >
+      </label>
+
+      <label id="includeAdminsRow" class="extract-option">
+        <input id="includeAdmins" type="checkbox" checked>
+        <span>Incluir administradores dos grupos</span>
+      </label>
+
+      <div id="extractionSummary" class="extract-summary">Nenhuma fonte selecionada.</div>
+
+      <div class="extract-actions">
+        <button id="startExtraction" class="primary" type="button" disabled>
+          Extrair contatos
+        </button>
+        <button id="cancelExtraction" class="danger" type="button" hidden>
+          Parar
+        </button>
+      </div>
+
+      <div id="extractionResult" class="extract-result" hidden>
+        <div>
+          <strong id="extractionResultCount">0 contatos extraídos</strong>
+          <small id="extractionResultDetails"></small>
+        </div>
+        <button id="downloadExtraction" class="primary" type="button">
+          Baixar CSV
+        </button>
+      </div>
+      <div id="extractionStatus" class="extract-status" aria-live="polite"></div>
+    </section>
+  </main>
+  <div id="extensionVersion" class="extension-version">Versão</div>
+  <script src="extractor-utils.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
