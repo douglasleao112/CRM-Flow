@@ -604,7 +604,13 @@ function visualMediaVariantsForBlock(block = {}) {
         .map(item => ({
           fileName: String(item?.fileName || ""),
           mimeType: String(item?.mimeType || fallbackMimeType),
-          dataUrl: String(item?.dataUrl || "")
+          dataUrl: String(item?.dataUrl || ""),
+          caption: Object.prototype.hasOwnProperty.call(item || {}, "caption")
+            ? String(item.caption || "")
+            : String(block.caption || ""),
+          viewOnce: Object.prototype.hasOwnProperty.call(item || {}, "viewOnce")
+            ? Boolean(item.viewOnce)
+            : Boolean(block.viewOnce)
         }))
         .filter(item => item.dataUrl)
     : [];
@@ -615,17 +621,27 @@ function visualMediaVariantsForBlock(block = {}) {
   return [{
     fileName: String(block.fileName || ""),
     mimeType: String(block.mimeType || fallbackMimeType),
-    dataUrl: String(block.dataUrl)
+    dataUrl: String(block.dataUrl),
+    caption: String(block.caption || ""),
+    viewOnce: Boolean(block.viewOnce)
   }];
 }
 
 function syncPrimaryVisualMediaFields(block) {
   const variants = visualMediaVariantsForBlock(block);
   block.mediaVariants = variants;
-  const primary = variants[0] || { fileName: "", mimeType: "", dataUrl: "" };
+  const primary = variants[0] || {
+    fileName: "",
+    mimeType: "",
+    dataUrl: "",
+    caption: "",
+    viewOnce: false
+  };
   block.fileName = primary.fileName;
   block.mimeType = primary.mimeType;
   block.dataUrl = primary.dataUrl;
+  block.caption = primary.caption;
+  block.viewOnce = primary.viewOnce;
 }
 
 function visualMediaBlockFields(block) {
@@ -669,6 +685,18 @@ function visualMediaBlockFields(block) {
               </div>
               <div class="visual-media-preview-body">${preview(media, mediaIndex)}</div>
             </div>
+
+            <div class="visual-media-variant-settings">
+              <label class="form-check visual-media-variant-view-once">
+                <input class="form-check-input" type="checkbox"
+                  data-media-variant-view-once="${mediaIndex}" ${media.viewOnce ? "checked" : ""}>
+                <span class="form-check-label">Visualização única</span>
+              </label>
+              <div class="node-field full visual-media-variant-caption">
+                <label>Legenda</label>
+                <textarea data-media-variant-caption="${mediaIndex}">${esc(media.caption || "")}</textarea>
+              </div>
+            </div>
           </div>
         `).join("") : `
           <div class="audio-file-preview-container media-file-preview-container">
@@ -702,14 +730,6 @@ function visualMediaBlockFields(block) {
         </div>
       ` : ""}
 
-      <label class="form-check visual-media-view-once">
-        <input class="form-check-input" type="checkbox" data-field="viewOnce" ${block.viewOnce ? "checked" : ""}>
-        <span class="form-check-label">Visualização única</span>
-      </label>
-      <div class="node-field full visual-media-caption">
-        <label>Legenda</label>
-        <textarea data-field="caption">${esc(block.caption || "")}</textarea>
-      </div>
     </div>
   `;
 }
@@ -726,7 +746,14 @@ async function validateWhatsAppMediaFile(file, block) {
     const hasH264 = signature.includes("avc1") || signature.includes("avc3");
     const hasHevc = signature.includes("hvc1") || signature.includes("hev1");
 
-    if (hasHevc) {
+    if (hasHevc && !hasH264) {
+      if (window.WFVideoConverter?.convertToWhatsAppVideo) {
+        return {
+          ok: true,
+          needsVideoConversion: true,
+          mimeType: "video/mp4"
+        };
+      }
       return {
         ok: false,
         message:
@@ -736,6 +763,13 @@ async function validateWhatsAppMediaFile(file, block) {
     }
 
     if (!isMp4 || !hasH264) {
+      if (window.WFVideoConverter?.convertToWhatsAppVideo) {
+        return {
+          ok: true,
+          needsVideoConversion: true,
+          mimeType: "video/mp4"
+        };
+      }
       return {
         ok: false,
         message:
@@ -1854,6 +1888,26 @@ $("#blocks").addEventListener("input", async event => {
   const block = flow.blocks.find(item => item.id === article.dataset.blockId);
   if (!block) return;
 
+  if (event.target.matches("[data-media-variant-caption], [data-media-variant-view-once]")) {
+    const variants = visualMediaVariantsForBlock(block);
+    const variantIndex = Number(
+      event.target.dataset.mediaVariantCaption ??
+      event.target.dataset.mediaVariantViewOnce
+    );
+    const variant = variants[variantIndex];
+    if (!variant) return;
+
+    if (event.target.matches("[data-media-variant-caption]")) {
+      variant.caption = event.target.value;
+    } else {
+      variant.viewOnce = event.target.checked;
+    }
+
+    block.mediaVariants = variants;
+    syncPrimaryVisualMediaFields(block);
+    return;
+  }
+
   const field = event.target.dataset.field;
   if (field) {
     if (field === "typingSeconds" || field === "recordingSeconds") {
@@ -1916,6 +1970,22 @@ $("#blocks").addEventListener("input", async event => {
         }
       }
 
+      if (validation.needsVideoConversion) {
+        const originalStatus = fileStatus?.innerHTML || "";
+        if (fileStatus) fileStatus.textContent = "Convertendo para MP4/H.264... 0%";
+        try {
+          preparedFile = await window.WFVideoConverter.convertToWhatsAppVideo(file, progress => {
+            if (fileStatus) fileStatus.textContent = `Convertendo para MP4/H.264... ${progress}%`;
+          });
+        } catch (conversionError) {
+          console.error("[WA Flow] Falha ao converter vídeo:", conversionError);
+          if (fileStatus) fileStatus.innerHTML = originalStatus;
+          alert(conversionError?.message || "Não foi possível converter este vídeo para MP4/H.264.");
+          event.target.value = "";
+          return;
+        }
+      }
+
       const reader = new FileReader();
       reader.onload = () => {
         const lowerName = preparedFile.name.toLowerCase();
@@ -1959,16 +2029,28 @@ $("#blocks").addEventListener("input", async event => {
               alert(`Este bloco já tem o limite de 5 ${block.type === "image" ? "imagens" : "vídeos"}.`);
               return;
             }
-            variants.push(mediaValue);
+            variants.push({ ...mediaValue, caption: "", viewOnce: false });
           } else if (event.target.matches("[data-media-variant-file]")) {
             const variantIndex = Number(event.target.dataset.mediaVariantFile);
             if (variantIndex >= 0 && variantIndex < variants.length) {
-              variants[variantIndex] = mediaValue;
+              variants[variantIndex] = {
+                ...mediaValue,
+                caption: String(variants[variantIndex].caption || ""),
+                viewOnce: Boolean(variants[variantIndex].viewOnce)
+              };
             }
           } else if (variants.length) {
-            variants[0] = mediaValue;
+            variants[0] = {
+              ...mediaValue,
+              caption: String(variants[0].caption || block.caption || ""),
+              viewOnce: Boolean(variants[0].viewOnce ?? block.viewOnce)
+            };
           } else {
-            variants.push(mediaValue);
+            variants.push({
+              ...mediaValue,
+              caption: String(block.caption || ""),
+              viewOnce: Boolean(block.viewOnce)
+            });
           }
           block.mediaVariants = variants.slice(0, 5);
           syncPrimaryVisualMediaFields(block);

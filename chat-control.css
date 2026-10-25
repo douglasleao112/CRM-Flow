@@ -1148,7 +1148,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid #e2e8f0;
 }
 
 .wf-schedule-attachment-row .wf-schedule-file {

@@ -1260,7 +1260,13 @@
               ...block,
               fileName: String(selectedVariant.fileName || block.fileName || ""),
               mimeType: String(selectedVariant.mimeType || block.mimeType || ""),
-              dataUrl: String(selectedVariant.dataUrl || "")
+              dataUrl: String(selectedVariant.dataUrl || ""),
+              caption: Object.prototype.hasOwnProperty.call(selectedVariant, "caption")
+                ? String(selectedVariant.caption || "")
+                : String(block.caption || ""),
+              viewOnce: Object.prototype.hasOwnProperty.call(selectedVariant, "viewOnce")
+                ? Boolean(selectedVariant.viewOnce)
+                : Boolean(block.viewOnce)
             }
           : block;
 
@@ -1281,7 +1287,7 @@
           } = selectedMediaBlock;
           const outgoingBlock = {
             ...mediaBlockWithoutVariants,
-            caption: interpolateContact(block.caption, message, chatId)
+            caption: interpolateContact(selectedMediaBlock.caption, message, chatId)
           };
           const mediaResult = await window.WFBridge.command(
             "SEND_FILE",

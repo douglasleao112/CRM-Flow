@@ -1,6 +1,6 @@
 # Zapflow — WhatsApp Flow Builder
 
-Versão atual: **2.16.39**
+Versão atual: **2.16.45**
 
 ## Correções principais
 
@@ -9,6 +9,7 @@ Versão atual: **2.16.39**
 - Suporte para fluxos grandes, incluindo áudio, imagem e vídeo em Base64.
 - Variações aleatórias de textos, áudios, imagens e vídeos.
 - Conversão automática de áudio para OGG/Opus e envio como mensagem de voz.
+- Conversão automática de vídeos incompatíveis para MP4/H.264.
 - Agendamentos com texto e mídia por variação.
 - Kanban por etiquetas e acompanhamento de falhas.
 - Importação compatível com:
