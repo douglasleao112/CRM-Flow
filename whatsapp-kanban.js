@@ -10,6 +10,7 @@
   let boards = [];
   let selectedBoardId = "";
   let search = "";
+  let columnSearch = null;
   let inboxSearch = "";
   let inboxFilter = "recent";
   let inboxFiltersExpanded = false;
@@ -21,9 +22,13 @@
   const cardHydrationAttemptedAt = new Map();
   let dragging = null;
   let draggingColumnId = "";
+  let draggingLabelColumnKey = "";
+  let draggingLabelCard = null;
   let activeCard = null;
   let actionCard = null;
   let actionColumn = null;
+  let actionLabel = null;
+  let pendingLabelCardRemoval = null;
   let columnActionTarget = null;
   let columnActionAnchorRect = null;
   let bulkColumnTarget = null;
@@ -35,6 +40,32 @@
   let nativeLabelsRefreshing = false;
   let nativeStageSyncing = false;
   let localSaveInFlight = 0;
+  let labelMutationRevision = 0;
+  let labelMutationsInFlight = 0;
+  let labelResyncTimer = null;
+  let zapFlowResizeHandler = null;
+
+  const scheduleLabelResync = (delay = 800) => {
+    if (labelResyncTimer) clearTimeout(labelResyncTimer);
+    labelResyncTimer = setTimeout(() => {
+      labelResyncTimer = null;
+      if (syncing || labelMutationsInFlight) {
+        scheduleLabelResync(800);
+        return;
+      }
+      sync({ silent: true });
+    }, delay);
+  };
+  const beginLabelMutation = () => {
+    if (labelMutationsInFlight) return false;
+    labelMutationRevision++;
+    labelMutationsInFlight++;
+    return true;
+  };
+  const finishLabelMutation = () => {
+    labelMutationsInFlight = Math.max(0, labelMutationsInFlight - 1);
+    scheduleLabelResync(800);
+  };
 
   const starterBoard = () => ({
     id: uid(), name: "Funil de vendas", columns: [
@@ -65,13 +96,36 @@
     const phone = String(card?.phone || "").replace(/\D/g, "");
     return String(phone ? `p:${phone}` : card?.chatId || card?.id || "");
   };
+  const labelNameHasMultipleCurrentIds = value => {
+    const name = normalizeLabelName(value);
+    if (!name) return false;
+    const ids = new Set();
+    const addId = label => {
+      if (normalizeLabelName(label?.name) !== name) return false;
+      const id = String(label?.id || "").trim();
+      if (id) ids.add(id);
+      return ids.size > 1;
+    };
+    for (const label of whatsappLabelCatalog) if (addId(label)) return true;
+    for (const item of boards) {
+      for (const column of item.columns || []) {
+        for (const card of column.cards || []) {
+          for (const label of Array.isArray(card.labels) ? card.labels : []) {
+            if (addId(label)) return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
   const cardHasLabel = (card, expectedLabel) => {
     const expectedId = String(expectedLabel?.id || "").trim();
     const expectedName = normalizeLabelName(expectedLabel?.name);
     return (card?.labels || []).some(label => {
       const id = String(label?.id || "").trim();
-      return (expectedId && id === expectedId) ||
-        (expectedName && normalizeLabelName(label?.name) === expectedName);
+      if (expectedId && id) return id === expectedId;
+      if (labelNameHasMultipleCurrentIds(expectedLabel?.name) && (id || expectedId)) return false;
+      return Boolean(expectedName && normalizeLabelName(label?.name) === expectedName);
     });
   };
   const labelsForBoard = current => {
@@ -80,9 +134,12 @@
       if (!isVisibleBusinessLabel(label)) return;
       const id = String(label?.id || "").trim();
       const name = normalizeLabelName(label?.name);
-      const existing = labels.find(item =>
-        (id && String(item.id || "").trim() === id) || normalizeLabelName(item.name) === name
-      );
+      const existing = labels.find(item => {
+        const itemId = String(item.id || "").trim();
+        if (id && itemId) return itemId === id;
+        if (labelNameHasMultipleCurrentIds(name) && (id || itemId)) return false;
+        return normalizeLabelName(item.name) === name;
+      });
       if (existing) {
         if (!existing.id && id) existing.id = id;
         if (!existing.color && safeLabelColor(label.color)) existing.color = safeLabelColor(label.color);
@@ -94,6 +151,285 @@
     whatsappLabelCatalog.forEach(add);
     allCards(current).forEach(card => (card.labels || []).forEach(add));
     return labels;
+  };
+  const labelViewLabelKey = label => {
+    const id = String(label?.id || "").trim();
+    if (id) return `id:${id}`;
+    return `name:${normalizeLabelName(label?.name)}`;
+  };
+  const labelViewLabelAliases = label => {
+    const nameKey = `name:${normalizeLabelName(label?.name)}`;
+    return nameKey !== labelViewLabelKey(label) ? [nameKey] : [];
+  };
+  const labelViewCardKey = card => {
+    const id = String(card?.id || "").trim();
+    return id ? `id:${id}` : `contact:${cardIdentity(card)}`;
+  };
+  const labelLayoutForBoard = current => {
+    const layout = current?.labelLayout;
+    return {
+      version: 1,
+      columnOrder: Array.isArray(layout?.columnOrder) ? layout.columnOrder.map(String) : [],
+      cardOrderByLabel: layout?.cardOrderByLabel && typeof layout.cardOrderByLabel === "object" && !Array.isArray(layout.cardOrderByLabel)
+        ? layout.cardOrderByLabel
+        : {}
+    };
+  };
+  const ensureLabelLayout = current => {
+    if (!current.labelLayout || typeof current.labelLayout !== "object" || Array.isArray(current.labelLayout)) {
+      current.labelLayout = {};
+    }
+    current.labelLayout.version = 1;
+    current.labelLayout.columnOrder = Array.isArray(current.labelLayout.columnOrder)
+      ? [...new Set(current.labelLayout.columnOrder.map(String).filter(Boolean))]
+      : [];
+    if (!current.labelLayout.cardOrderByLabel || typeof current.labelLayout.cardOrderByLabel !== "object" || Array.isArray(current.labelLayout.cardOrderByLabel)) {
+      current.labelLayout.cardOrderByLabel = {};
+    }
+    Object.keys(current.labelLayout.cardOrderByLabel).forEach(key => {
+      const order = current.labelLayout.cardOrderByLabel[key];
+      if (Array.isArray(order)) current.labelLayout.cardOrderByLabel[key] = [...new Set(order.map(String).filter(Boolean))];
+      else delete current.labelLayout.cardOrderByLabel[key];
+    });
+    return current.labelLayout;
+  };
+  const orderItemsBySavedKeys = (items, savedOrder, keyFor, aliasesFor = () => []) => {
+    const lookup = new Map();
+    items.forEach(item => [keyFor(item), ...aliasesFor(item)].filter(Boolean).forEach(key => lookup.set(String(key), item)));
+    const used = new Set();
+    const ordered = [];
+    (Array.isArray(savedOrder) ? savedOrder : []).forEach(key => {
+      const item = lookup.get(String(key));
+      if (!item || used.has(item)) return;
+      used.add(item);
+      ordered.push(item);
+    });
+    items.forEach(item => {
+      if (used.has(item)) return;
+      used.add(item);
+      ordered.push(item);
+    });
+    return ordered;
+  };
+  const matchesColumnSearch = (card, query) => {
+    const term = String(query || "").trim();
+    if (!term) return false;
+    const nameTerm = normalizeLabelName(term);
+    const numberTerm = term.replace(/\D/g, "");
+    const name = normalizeLabelName(card?.name);
+    const number = String(card?.phone || "").replace(/\D/g, "");
+    return Boolean((nameTerm && name.includes(nameTerm)) || (numberTerm && number.includes(numberTerm)));
+  };
+  const prioritizeColumnMatches = (items, query, getCard = item => item) => {
+    if (!String(query || "").trim()) return { ordered: items, matchCount: 0 };
+    const matched = [];
+    const remaining = [];
+    items.forEach(item => (matchesColumnSearch(getCard(item), query) ? matched : remaining).push(item));
+    return { ordered: [...matched, ...remaining], matchCount: matched.length };
+  };
+  const columnSearchQuery = (kind, key, current) =>
+    columnSearch?.kind === kind && columnSearch.key === String(key) && columnSearch.boardId === current?.id
+      ? columnSearch.query.trim() : "";
+  const mergeReorderedActiveKeys = (savedOrder, activeOrder, canonicalActiveKey) => {
+    const saved = [...new Set((Array.isArray(savedOrder) ? savedOrder : []).map(String).filter(Boolean))];
+    const active = [...new Set((Array.isArray(activeOrder) ? activeOrder : []).map(String).filter(Boolean))];
+    const activeQueue = [...active];
+    const occupiedActiveSlots = new Set();
+    const merged = [];
+    saved.forEach(savedKey => {
+      const canonical = canonicalActiveKey(savedKey);
+      if (!canonical) {
+        merged.push(savedKey);
+        return;
+      }
+      if (occupiedActiveSlots.has(canonical)) return;
+      occupiedActiveSlots.add(canonical);
+      const nextActiveKey = activeQueue.shift();
+      if (nextActiveKey) merged.push(nextActiveKey);
+    });
+    merged.push(...activeQueue);
+    return [...new Set(merged)];
+  };
+  const isPendingLabelCandidate = (card, label) => {
+    const pending = pendingLabelCardRemoval;
+    if (!pending || pending.cardKey !== cardIdentity(card)) return false;
+    const candidateId = String(label?.id || "").trim();
+    const expectedId = String(pending.label?.id || "").trim();
+    if (candidateId) return candidateId === expectedId;
+    return !labelNameHasMultipleCurrentIds(pending.label?.name) &&
+      normalizeLabelName(label?.name) === normalizeLabelName(pending.label?.name);
+  };
+  const labelEntriesForBoard = (current, label) => {
+    const uniqueCards = new Map();
+    current.columns.forEach(column => column.cards.forEach(card => {
+      if (!cardHasLabel(card, label)) return;
+      if (isPendingLabelCandidate(card, label)) return;
+      const identity = cardIdentity(card) || labelViewCardKey(card);
+      if (!uniqueCards.has(identity)) uniqueCards.set(identity, { card, columnId: column.id });
+    }));
+    return [...uniqueCards.values()].sort((first, second) => Number(second.card.updatedAt || 0) - Number(first.card.updatedAt || 0));
+  };
+  const labelsRepresentSame = (candidate, expected) => {
+    const candidateId = String(candidate?.id || "").trim();
+    const expectedId = String(expected?.id || "").trim();
+    const candidateName = normalizeLabelName(candidate?.name);
+    const expectedName = normalizeLabelName(expected?.name);
+    if (candidateId && expectedId) return candidateId === expectedId;
+    if (labelNameHasMultipleCurrentIds(expected?.name) && (candidateId || expectedId)) return false;
+    return Boolean(candidateName && expectedName && candidateName === expectedName);
+  };
+  const labelActionTargetForBoard = (current, label) => ({
+    kind: "label",
+    id: `label:${labelViewLabelKey(label)}`,
+    name: String(label?.name || "Etiqueta"),
+    label: { ...label },
+    labelKey: labelViewLabelKey(label),
+    cards: labelEntriesForBoard(current, label).map(entry => entry.card)
+  });
+  const removeLabelReferences = (label, chatIds = null) => {
+    const allowedChatIds = Array.isArray(chatIds) ? new Set(chatIds.map(String)) : null;
+    boards.forEach(item => (item.columns || []).forEach(column => (column.cards || []).forEach(card => {
+      if (allowedChatIds && !allowedChatIds.has(String(card.chatId || ""))) return;
+      card.labels = (Array.isArray(card.labels) ? card.labels : []).filter(candidate => !labelsRepresentSame(candidate, label));
+    })));
+  };
+  const labelNameIsAmbiguousForAction = label => {
+    return labelNameHasMultipleCurrentIds(label?.name);
+  };
+  const cardHasRemovableLabel = (card, label) => {
+    const labelId = String(label?.id || "").trim();
+    const labelName = normalizeLabelName(label?.name);
+    return Boolean(labelId && (card?.labels || []).some(candidate => {
+      const candidateId = String(candidate?.id || "").trim();
+      if (candidateId) return candidateId === labelId;
+      return !labelNameIsAmbiguousForAction(label) &&
+        normalizeLabelName(candidate?.name) === labelName;
+    }));
+  };
+  const removeConfirmedCardLabelReferences = (label, chatIds) => {
+    const confirmed = new Set(chatIds.map(String));
+    const labelId = String(label?.id || "").trim();
+    const labelName = normalizeLabelName(label?.name);
+    const ambiguousName = labelNameIsAmbiguousForAction(label);
+    boards.forEach(item => (item.columns || []).forEach(column => (column.cards || []).forEach(card => {
+      if (!confirmed.has(String(card.chatId || ""))) return;
+      card.labels = (Array.isArray(card.labels) ? card.labels : []).filter(candidate => {
+        const candidateId = String(candidate?.id || "").trim();
+        if (candidateId) return candidateId !== labelId;
+        return ambiguousName || normalizeLabelName(candidate?.name) !== labelName;
+      });
+    })));
+  };
+  const addConfirmedCardLabelReference = (label, chatId) => {
+    const confirmedChatId = String(chatId || "");
+    boards.forEach(item => (item.columns || []).forEach(column => (column.cards || []).forEach(card => {
+      if (String(card.chatId || "") !== confirmedChatId) return;
+      card.labels = Array.isArray(card.labels) ? card.labels : [];
+      if (!card.labels.some(candidate => labelsRepresentSame(candidate, label))) {
+        card.labels.push({ id: String(label.id || ""), name: String(label.name || "Etiqueta"), color: safeLabelColor(label.color) });
+      }
+    })));
+  };
+  const moveLabelCardBetweenColumns = async (current, { cardKey, sourceKey, targetKey, targetCardKey, placeAfter }) => {
+    const labels = labelsForBoard(current);
+    const sourceLabel = labels.find(label => labelViewLabelKey(label) === sourceKey);
+    const targetLabel = labels.find(label => labelViewLabelKey(label) === targetKey);
+    const card = sourceLabel && labelEntriesForBoard(current, sourceLabel)
+      .find(entry => labelViewCardKey(entry.card) === cardKey)?.card;
+    const chatId = String(card?.chatId || "");
+    if (!sourceLabel || !targetLabel || !card || !String(sourceLabel.id || "").trim() ||
+      !String(targetLabel.id || "").trim() || !chatId.includes("@") || !cardHasRemovableLabel(card, sourceLabel)) {
+      alert("Não foi possível identificar o contato ou as etiquetas no WhatsApp. Clique em Sincronizar e tente novamente.");
+      return false;
+    }
+    if (!beginLabelMutation()) {
+      alert("Aguarde a alteração atual da etiqueta terminar.");
+      return false;
+    }
+    let destinationAdded = false;
+    let sourceRemoved = false;
+    try {
+      if (!cardHasLabel(card, targetLabel)) {
+        const response = await window.WFBridge.command("APPLY_CHAT_LABEL", {
+          chatId, labelId: targetLabel.id, labelName: targetLabel.name
+        }, 60000);
+        addConfirmedCardLabelReference({
+          ...targetLabel,
+          id: String(response.result?.labelId || targetLabel.id),
+          name: String(response.result?.labelName || targetLabel.name)
+        }, chatId);
+        destinationAdded = true;
+      }
+      await window.WFBridge.command("REMOVE_CHAT_LABEL", {
+        chatId, labelId: sourceLabel.id, labelName: sourceLabel.name
+      }, 60000);
+      removeConfirmedCardLabelReferences(sourceLabel, [chatId]);
+      sourceRemoved = true;
+
+      const layout = ensureLabelLayout(current);
+      const savedOrder = savedCardOrderForLabel(layout, targetLabel);
+      const order = orderItemsBySavedKeys(
+        labelEntriesForBoard(current, targetLabel), savedOrder,
+        entry => labelViewCardKey(entry.card)
+      ).map(entry => labelViewCardKey(entry.card)).filter(key => key !== cardKey);
+      let insertIndex = targetCardKey && targetCardKey !== cardKey ? order.indexOf(targetCardKey) : -1;
+      if (insertIndex < 0) insertIndex = order.length;
+      else if (placeAfter) insertIndex++;
+      order.splice(insertIndex, 0, cardKey);
+      const activeCardKeys = new Set(order);
+      layout.cardOrderByLabel[targetKey] = mergeReorderedActiveKeys(
+        savedOrder, order, key => activeCardKeys.has(String(key)) ? String(key) : ""
+      );
+      labelViewLabelAliases(targetLabel).forEach(alias => {
+        if (alias !== targetKey) delete layout.cardOrderByLabel[alias];
+      });
+      await save();
+      render();
+      return true;
+    } catch (error) {
+      if (destinationAdded || sourceRemoved) {
+        try { await save(); } catch (saveError) {
+          console.error("[WA Flow] Não foi possível salvar a troca de etiquetas no Kanban.", saveError);
+        }
+      }
+      render();
+      const reason = error?.message || String(error);
+      alert(sourceRemoved
+        ? `As etiquetas foram trocadas no WhatsApp, mas o Kanban não conseguiu salvar. Clique em Sincronizar. ${reason}`
+        : destinationAdded
+          ? `A etiqueta de destino foi aplicada, mas não foi possível remover a etiqueta de origem. O contato ficou nas duas colunas. Clique em Sincronizar. ${reason}`
+          : `Não foi possível trocar a etiqueta. A etiqueta de origem foi mantida. ${reason}`);
+      return false;
+    } finally {
+      finishLabelMutation();
+    }
+  };
+  const migrateLabelLayoutKey = (oldLabel, newLabel) => {
+    const oldKeys = [...new Set([labelViewLabelKey(oldLabel), ...labelViewLabelAliases(oldLabel)])];
+    const newKey = labelViewLabelKey(newLabel);
+    boards.forEach(item => {
+      const layout = ensureLabelLayout(item);
+      layout.columnOrder = [...new Set(layout.columnOrder.map(key => oldKeys.includes(key) ? newKey : key))];
+      const previousCardOrder = oldKeys.map(key => layout.cardOrderByLabel[key]).find(Array.isArray);
+      if (previousCardOrder && !Array.isArray(layout.cardOrderByLabel[newKey])) {
+        layout.cardOrderByLabel[newKey] = [...previousCardOrder];
+      }
+      oldKeys.filter(key => key !== newKey).forEach(key => delete layout.cardOrderByLabel[key]);
+    });
+  };
+  const removeLabelLayout = label => {
+    const keys = new Set([labelViewLabelKey(label), ...labelViewLabelAliases(label)]);
+    boards.forEach(item => {
+      const layout = ensureLabelLayout(item);
+      layout.columnOrder = layout.columnOrder.filter(key => !keys.has(key));
+      keys.forEach(key => delete layout.cardOrderByLabel[key]);
+    });
+  };
+  const savedCardOrderForLabel = (layout, label) => {
+    for (const key of [labelViewLabelKey(label), ...labelViewLabelAliases(label)]) {
+      if (Array.isArray(layout.cardOrderByLabel?.[key])) return layout.cardOrderByLabel[key];
+    }
+    return [];
   };
   const safeMessagePreview = (value, type = "") => {
     const text = String(value || "").trim();
@@ -390,14 +726,19 @@
     }
   }
 
+  const isDeliveryFailure = item => ["failed", "skipped", "unconfirmed"].includes(item?.status);
+
   function failureTargets(messages) {
     const grouped = new Map();
     (Array.isArray(messages) ? messages : [])
-      .filter(item => item?.status === "failed")
+      .filter(isDeliveryFailure)
       .forEach(item => {
-        const targets = Array.isArray(item.bulkTargets) && item.bulkTargets.length
-          ? item.bulkTargets
-          : [{ chatId: item.chatId, chatName: item.chatName }];
+        const hasTargetStates = Array.isArray(item.targetStates) && item.targetStates.length;
+        const targets = hasTargetStates
+          ? item.targetStates.filter(isDeliveryFailure)
+          : Array.isArray(item.bulkTargets) && item.bulkTargets.length
+            ? item.bulkTargets
+            : [{ chatId: item.chatId, chatName: item.chatName }];
         targets.forEach(target => {
           const chatId = String(target?.chatId || item.chatId || "").trim();
           if (!chatId) return;
@@ -414,7 +755,7 @@
           entry.count += 1;
           if (updatedAt >= entry.updatedAt) {
             entry.updatedAt = updatedAt;
-            entry.error = String(item.error || "Mensagem não enviada");
+            entry.error = String(target.error || item.error || "Mensagem não enviada");
             entry.preview = String(item.type === "flow" ? item.flowName || "Fluxo" : item.text || item.texts?.[0] || "");
           }
           grouped.set(chatId, entry);
@@ -442,7 +783,7 @@
     try {
       const stored = await chrome.storage.local.get("wfScheduledMessages");
       const failedMessages = (Array.isArray(stored.wfScheduledMessages) ? stored.wfScheduledMessages : [])
-        .filter(item => item?.status === "failed");
+        .filter(isDeliveryFailure);
       const failures = failureTargets(stored.wfScheduledMessages);
       const badge = button.querySelector(".wf-failures-badge");
       badge.textContent = failures.length > 99 ? "99+" : String(failures.length);
@@ -556,13 +897,19 @@
       feedback.classList.toggle("error", error);
     };
     const updateFailedMessages = async updater => {
-      const stored = await chrome.storage.local.get("wfScheduledMessages");
-      const messages = Array.isArray(stored.wfScheduledMessages) ? stored.wfScheduledMessages : [];
-      const failed = messages.filter(item => item?.status === "failed");
-      if (!failed.length) return 0;
-      await chrome.storage.local.set({ wfScheduledMessages: updater(messages, failed) });
+      const update = async () => {
+        const stored = await chrome.storage.local.get("wfScheduledMessages");
+        const messages = Array.isArray(stored.wfScheduledMessages) ? stored.wfScheduledMessages : [];
+        const failed = messages.filter(isDeliveryFailure);
+        if (!failed.length) return 0;
+        await chrome.storage.local.set({ wfScheduledMessages: updater(messages, failed) });
+        return failed.length;
+      };
+      const count = navigator.locks?.request
+        ? await navigator.locks.request("wf-flow-failure-ledger", update)
+        : await update();
       await refreshFailures();
-      return failed.length;
+      return count;
     };
     panel.querySelector("#wf-failures-send-all").onclick = async event => {
       const action = event.currentTarget;
@@ -571,7 +918,7 @@
       try {
         const now = Date.now();
         const count = await updateFailedMessages(messages => messages.map(item => {
-          if (item?.status !== "failed") return item;
+          if (!isDeliveryFailure(item)) return item;
           const recurring = Boolean(item.repeat && item.repeat !== "none");
           return {
             ...item,
@@ -579,7 +926,12 @@
             scheduledAt: now,
             ...(recurring ? { recurrenceAnchorAt: Number(item.recurrenceAnchorAt || item.scheduledAt) } : {}),
             updatedAt: now,
-            error: ""
+            error: "",
+            targetStates: Array.isArray(item.targetStates)
+              ? item.targetStates.map(target => isDeliveryFailure(target)
+                ? { ...target, status: "pending", error: "", errorCode: "", updatedAt: now }
+                : target)
+              : item.targetStates
           };
         }));
         setFeedback(count ? `${count} mensagem${count === 1 ? "" : "s"} colocada${count === 1 ? "" : "s"} na fila de envio.` : "Nenhuma mensagem com falha.");
@@ -595,7 +947,7 @@
       action.disabled = true;
       setFeedback("Excluindo mensagens com falha...");
       try {
-        const count = await updateFailedMessages(messages => messages.filter(item => item?.status !== "failed"));
+        const count = await updateFailedMessages(messages => messages.filter(item => !isDeliveryFailure(item)));
         setFeedback(count ? `${count} mensagem${count === 1 ? "" : "s"} excluída${count === 1 ? "" : "s"}.` : "Nenhuma mensagem com falha.");
       } catch (error) {
         setFeedback(error?.message || "Não foi possível excluir as mensagens.", true);
@@ -630,14 +982,19 @@
       setFeedback("Reprogramando mensagens...");
       try {
         const now = Date.now();
-        const count = await updateFailedMessages(messages => messages.map(item => item?.status === "failed"
+        const count = await updateFailedMessages(messages => messages.map(item => isDeliveryFailure(item)
           ? {
               ...item,
               status: "pending",
               scheduledAt,
               ...(item.repeat && item.repeat !== "none" ? { recurrenceAnchorAt: scheduledAt } : {}),
               updatedAt: now,
-              error: ""
+              error: "",
+              targetStates: Array.isArray(item.targetStates)
+                ? item.targetStates.map(target => isDeliveryFailure(target)
+                  ? { ...target, status: "pending", error: "", errorCode: "", updatedAt: now }
+                  : target)
+                : item.targetStates
             }
           : item));
         rescheduleForm.hidden = true;
@@ -670,8 +1027,51 @@
     refreshFailures();
   }
 
+  function mountZapFlow(kanbanButton) {
+    if (document.querySelector("#wf-zap-flow-button")) return;
+    const button = document.createElement("button");
+    button.id = "wf-zap-flow-button";
+    button.type = "button";
+    button.title = "Zap Flow";
+    button.setAttribute("aria-label", "Abrir Zap Flow");
+    button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13.5 2.5-9 11h6l-1 8 10-12h-6l0-7Z"></path></svg><span>Zap Flow</span>`;
+    const failuresButton = document.querySelector("#wf-failures-button");
+    (failuresButton || kanbanButton).before(button);
+
+    const position = () => {
+      const rect = kanbanButton.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      button.style.left = `${rect.left}px`;
+      button.style.top = `${Math.max(0, rect.top - (rect.height * 2))}px`;
+      button.style.width = `${rect.width}px`;
+      button.style.height = `${rect.height}px`;
+    };
+    requestAnimationFrame(position);
+    setTimeout(position, 500);
+    if (zapFlowResizeHandler) window.removeEventListener("resize", zapFlowResizeHandler);
+    zapFlowResizeHandler = position;
+    window.addEventListener("resize", zapFlowResizeHandler);
+
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        await chrome.runtime.sendMessage({ type: "WF_OPEN_POPUP" });
+      } catch (error) {
+        console.error("[WA Flow] Não foi possível abrir o Zap Flow.", error);
+        alert("Não foi possível abrir o Zap Flow. Recarregue a extensão e tente novamente.");
+      } finally {
+        button.disabled = false;
+      }
+    };
+  }
+
   function mount() {
-    if (!document.body || document.querySelector("#wf-kanban-button")) return;
+    if (!document.body) return;
+    const existingKanbanButton = document.querySelector("#wf-kanban-button");
+    if (existingKanbanButton) {
+      mountZapFlow(existingKanbanButton);
+      return;
+    }
     // Wait for WhatsApp's conversation/sidebar shell so the Kanban shortcut
     // appears together with the native navigation instead of during boot.
     if (!document.querySelector("#side")) return;
@@ -683,6 +1083,7 @@
     button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M8 8v8M12 8v5M16 8v7"></path></svg><span>Kanban</span>`;
     document.body.appendChild(button);
     mountFailures(button);
+    mountZapFlow(button);
 
     const panel = document.createElement("section");
     panel.id = "wf-kanban-panel";
@@ -700,18 +1101,26 @@
       <div class="wf-kb-subbar"><div><strong id="wf-kb-board-name"></strong><span id="wf-kb-total"></span></div><div id="wf-kb-board-actions"><button id="wf-kb-rename" type="button">Renomear</button><button id="wf-kb-delete" class="danger" type="button">Excluir</button><button id="wf-kb-add-column" type="button">+ Etapa</button></div></div>
       <main id="wf-kb-board"></main>
       <div id="wf-kb-chat-modal" hidden><div class="wf-kb-chat-dialog"><header><div class="wf-kb-contact"><span id="wf-kb-chat-avatar"></span><div><strong id="wf-kb-chat-name"></strong><small id="wf-kb-chat-phone"></small></div></div><button id="wf-kb-chat-close" type="button">×</button></header><div id="wf-kb-chat-messages"></div><footer class="wf-kb-chat-composer"><textarea id="wf-kb-chat-input" rows="1" placeholder="Digite uma mensagem"></textarea><button id="wf-kb-chat-send" type="button" title="Enviar mensagem" aria-label="Enviar mensagem"><svg viewBox="0 0 24 24"><path d="m3 20 18-8L3 4v6l12 2-12 2v6Z"></path></svg></button></footer></div></div>
-      <div id="wf-kb-card-actions" hidden><div class="wf-kb-card-actions-dialog"><strong id="wf-kb-action-name"></strong><div class="wf-kb-card-action-buttons"><button id="wf-kb-action-edit" type="button">Editar</button><button id="wf-kb-action-delete" class="danger" type="button">Excluir</button></div></div></div>
-      <div id="wf-kb-column-actions" hidden><div class="wf-kb-column-actions-dialog"><strong id="wf-kb-column-action-name"></strong><button id="wf-kb-column-action-bulk" type="button">➤ <span>Disparo em Massa</span></button><button id="wf-kb-column-action-edit" type="button">✎ <span>Editar etapa</span></button><button id="wf-kb-column-action-clear" type="button">🧹 <span>Limpar etapa</span></button><button id="wf-kb-column-action-delete" class="danger" type="button">♲ <span>Excluir etapa</span></button></div></div>
+      <div id="wf-kb-card-actions" hidden><div class="wf-kb-card-actions-dialog"><strong id="wf-kb-action-name"></strong><div class="wf-kb-card-action-buttons"><button id="wf-kb-action-edit" type="button">Editar</button><button id="wf-kb-action-delete" class="danger" type="button">Excluir</button><button id="wf-kb-action-remove-label" class="danger" type="button" hidden>Remover etiqueta</button></div></div></div>
+      <div id="wf-kb-column-actions" hidden><div class="wf-kb-column-actions-dialog"><strong id="wf-kb-column-action-name"></strong><button id="wf-kb-column-action-search" type="button">⌕ <span>Buscar contato</span></button><button id="wf-kb-column-action-bulk" type="button">➤ <span>Disparo em Massa</span></button><button id="wf-kb-column-action-edit" type="button">✎ <span>Editar etapa</span></button><button id="wf-kb-column-action-clear" type="button">🧹 <span>Limpar etapa</span></button><button id="wf-kb-column-action-delete" class="danger" type="button">♲ <span>Excluir etapa</span></button></div></div>
+      <div id="wf-kb-column-search-popover" hidden><label for="wf-kb-column-search-input">Buscar nesta coluna</label><div class="wf-kb-column-search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m16 16 5 5"></path></svg><input id="wf-kb-column-search-input" type="search" autocomplete="off" placeholder="Nome ou número"><button id="wf-kb-column-search-close" type="button" title="Fechar busca" aria-label="Fechar busca">×</button></div><small id="wf-kb-column-search-status" aria-live="polite">Digite um nome ou número</small></div>
       <div id="wf-kb-bulk-modal" hidden><form id="wf-kb-bulk-form" class="wf-kb-bulk-dialog"><header><div><strong>Disparo em Massa</strong><span id="wf-kb-bulk-column-name"></span></div><button id="wf-kb-bulk-close" type="button" aria-label="Fechar">×</button></header><div class="wf-kb-bulk-kind"><button type="button" class="active" data-bulk-kind="message">Mensagem</button><button type="button" data-bulk-kind="flow">Fluxo</button></div><label id="wf-kb-bulk-message-wrap">Mensagem<textarea id="wf-kb-bulk-message" rows="5" placeholder="Digite a mensagem que será enviada"></textarea></label><label id="wf-kb-bulk-flow-wrap" hidden>Fluxo<select id="wf-kb-bulk-flow"><option value="">Selecione um fluxo</option></select></label><label>Quando<select id="wf-kb-bulk-when"><option value="now">Enviar agora</option><option value="schedule">Programar</option></select></label><div id="wf-kb-bulk-schedule" hidden><div class="wf-kb-bulk-datetime"><label>Data<input id="wf-kb-bulk-date" type="date"></label><label>Hora<input id="wf-kb-bulk-time" type="time"></label></div><label>Repetir<select id="wf-kb-bulk-repeat"><option value="none">Não repetir</option><option value="hourly">A cada hora</option><option value="daily">Todos os dias</option><option value="weekly">Toda semana</option><option value="biweekly">Quinzenal</option><option value="monthly">Todo mês</option><option value="yearly">Todo ano</option><option value="custom">Personalizado...</option></select></label><div id="wf-kb-bulk-custom" class="wf-kb-bulk-datetime" hidden><label>Repetir a cada<input id="wf-kb-bulk-every" type="number" min="1" value="1"></label><label>Unidade<select id="wf-kb-bulk-unit"><option value="minutes">Minuto(s)</option><option value="hours">Hora(s)</option><option value="days">Dia(s)</option><option value="weeks">Semana(s)</option><option value="months">Mês(es)</option></select></label></div><label class="wf-kb-bulk-check"><input id="wf-kb-bulk-cancel" type="checkbox"> Cancelar se o contato responder antes</label></div><div id="wf-kb-bulk-feedback"></div><footer><button type="button" id="wf-kb-bulk-cancel-button">Cancelar</button><button type="submit" class="primary">Enviar</button></footer></form></div>
       <div id="wf-kb-native-backdrop" hidden><button id="wf-kb-native-close" type="button" title="Fechar conversa" aria-label="Fechar conversa">×</button></div>`;
     document.body.appendChild(panel);
     bind();
   }
 
-  function cardTemplate(card, columnId, { readOnly = false } = {}) {
+  function cardTemplate(card, columnId, { readOnly = false, labelDragKey = "", labelSourceKey = "", searchMatch = false, disableDrag = false } = {}) {
     const cardId = escapeHtml(card.id);
     const sourceColumnId = escapeHtml(columnId);
-    return `<article class="wf-kb-card${readOnly ? " wf-kb-label-card" : ""}" ${readOnly ? "" : 'draggable="true"'} data-card="${cardId}" data-from="${sourceColumnId}"><div class="wf-kb-card-head"><span data-open-card="${cardId}" data-open-column="${sourceColumnId}" title="Abrir conversa">${escapeHtml(initials(card.name))}</span>${readOnly ? "" : `<button data-edit-card="${cardId}" data-card-column="${sourceColumnId}" type="button" title="Ações do contato">•••</button>`}</div><button class="wf-kb-card-name" data-open-card="${cardId}" data-open-column="${sourceColumnId}" type="button" title="Abrir conversa">${escapeHtml(card.name || "Contato")}</button><small data-open-card="${cardId}" data-open-column="${sourceColumnId}" title="Abrir conversa">${escapeHtml(formatPhone(card.phone))}</small>${card.lastMessage ? `<p data-open-card="${cardId}" data-open-column="${sourceColumnId}" title="Abrir conversa">${escapeHtml(safeMessagePreview(card.lastMessage, card.messages?.[card.messages.length - 1]?.type))}</p>` : ""}${card.unreadCount ? `<footer><b>${card.unreadCount} nova${card.unreadCount === 1 ? "" : "s"}</b></footer>` : ""}</article>`;
+    const canDrag = (!readOnly || Boolean(labelDragKey)) && !disableDrag;
+    const labelDragAttributes = labelDragKey
+      ? ` data-label-card="${escapeHtml(labelDragKey)}" data-label-source="${escapeHtml(labelSourceKey)}"`
+      : "";
+    const actionsButton = readOnly
+      ? `<button data-edit-label-card="${cardId}" data-card-column="${sourceColumnId}" data-card-label="${escapeHtml(labelSourceKey)}" type="button" title="Ações da etiqueta deste contato" aria-label="Ações da etiqueta de ${escapeHtml(card.name || "Contato")}">•••</button>`
+      : `<button data-edit-card="${cardId}" data-card-column="${sourceColumnId}" type="button" title="Ações do contato" aria-label="Ações de ${escapeHtml(card.name || "Contato")}">•••</button>`;
+    return `<article class="wf-kb-card${readOnly ? " wf-kb-label-card" : ""}${searchMatch ? " wf-kb-search-match" : ""}" ${canDrag ? 'draggable="true"' : ""} data-card="${cardId}" data-from="${sourceColumnId}"${labelDragAttributes}><div class="wf-kb-card-head"><span data-open-card="${cardId}" data-open-column="${sourceColumnId}" title="Abrir conversa">${escapeHtml(initials(card.name))}</span>${actionsButton}</div><button class="wf-kb-card-name" data-open-card="${cardId}" data-open-column="${sourceColumnId}" type="button" title="Abrir conversa">${escapeHtml(card.name || "Contato")}</button><small data-open-card="${cardId}" data-open-column="${sourceColumnId}" title="Abrir conversa">${escapeHtml(formatPhone(card.phone))}</small>${card.lastMessage ? `<p data-open-card="${cardId}" data-open-column="${sourceColumnId}" title="Abrir conversa">${escapeHtml(safeMessagePreview(card.lastMessage, card.messages?.[card.messages.length - 1]?.type))}</p>` : ""}${card.unreadCount ? `<footer><b>${card.unreadCount} nova${card.unreadCount === 1 ? "" : "s"}</b></footer>` : ""}</article>`;
   }
 
   function decorateRenderedCards(current, root = document.querySelector("#wf-kb-board")) {
@@ -753,28 +1162,31 @@
   }
 
   function renderLabelsView(current, boardElement, boardScroll, columnScrolls) {
-    const locatedCards = [];
-    current.columns.forEach(column => column.cards.forEach(card => locatedCards.push({ card, columnId: column.id })));
-    const labels = labelsForBoard(current);
-    const labeledContacts = new Set(locatedCards
-      .filter(({ card }) => (card.labels || []).some(isVisibleBusinessLabel))
-      .map(({ card }) => cardIdentity(card))
+    const layout = labelLayoutForBoard(current);
+    const labels = orderItemsBySavedKeys(labelsForBoard(current), layout.columnOrder, labelViewLabelKey, labelViewLabelAliases);
+    const labeledContacts = new Set(allCards(current)
+      .filter(card => (card.labels || []).some(label =>
+        isVisibleBusinessLabel(label) && !isPendingLabelCandidate(card, label)
+      ))
+      .map(card => cardIdentity(card))
       .filter(Boolean));
     document.querySelector("#wf-kb-board-name").textContent = "Etiquetas";
     document.querySelector("#wf-kb-total").textContent = `${labeledContacts.size} contato${labeledContacts.size === 1 ? "" : "s"} com etiqueta`;
     boardElement.innerHTML = labels.map((label, index) => {
-      const uniqueCards = new Map();
-      locatedCards.forEach(item => {
-        if (!cardHasLabel(item.card, label)) return;
+      const labelKey = labelViewLabelKey(label);
+      const allEntries = orderItemsBySavedKeys(
+        labelEntriesForBoard(current, label),
+        savedCardOrderForLabel(layout, label),
+        entry => labelViewCardKey(entry.card)
+      );
+      const entries = allEntries.filter(item => {
         const haystack = `${item.card.name} ${item.card.phone} ${item.card.lastMessage}`.toLocaleLowerCase("pt-BR");
-        if (search && !haystack.includes(search)) return;
-        const identity = cardIdentity(item.card);
-        if (identity && !uniqueCards.has(identity)) uniqueCards.set(identity, item);
+        return !search || haystack.includes(search);
       });
-      const entries = [...uniqueCards.values()].sort((first, second) => Number(second.card.updatedAt || 0) - Number(first.card.updatedAt || 0));
-      const labelKey = String(label.id || normalizeLabelName(label.name));
+      const query = columnSearchQuery("label", labelKey, current);
+      const { ordered: displayedEntries } = prioritizeColumnMatches(entries, query, item => item.card);
       const labelColor = safeLabelColor(label.color) || colors[index % colors.length];
-      return `<section class="wf-kb-column wf-kb-label-column" data-label-column="${escapeHtml(labelKey)}" style="--column:${escapeHtml(labelColor)}"><header><div><i></i><strong>${escapeHtml(label.name || "Etiqueta")}</strong><b>${entries.length}</b></div></header><div class="wf-kb-card-list" data-label-list="${escapeHtml(labelKey)}">${entries.map(({ card, columnId }) => cardTemplate(card, columnId, { readOnly: true })).join("")}${entries.length ? "" : '<div class="wf-kb-label-empty">Nenhum contato nesta etiqueta</div>'}</div></section>`;
+      return `<section class="wf-kb-column wf-kb-label-column" data-label-column="${escapeHtml(labelKey)}" style="--column:${escapeHtml(labelColor)}"><header draggable="true" data-label-column-drag="${escapeHtml(labelKey)}" title="Arraste para mover esta etiqueta"><div><i></i><strong>${escapeHtml(label.name || "Etiqueta")}</strong><b>${entries.length}</b></div><aside><button data-edit-label-column="${escapeHtml(labelKey)}" title="Opções da etiqueta">•••</button></aside></header><div class="wf-kb-card-list" data-label-list="${escapeHtml(labelKey)}">${displayedEntries.map(({ card, columnId }) => cardTemplate(card, columnId, { readOnly: true, labelDragKey: labelViewCardKey(card), labelSourceKey: labelKey, searchMatch: Boolean(query) && matchesColumnSearch(card, query), disableDrag: Boolean(query) })).join("")}${entries.length ? "" : '<div class="wf-kb-label-empty">Nenhum contato nesta etiqueta</div>'}</div></section>`;
     }).join("") || '<div class="wf-kb-labels-empty"><strong>Nenhuma etiqueta encontrada</strong><span>Clique em Sincronizar para carregar as etiquetas do WhatsApp.</span></div>';
     decorateRenderedCards(current, boardElement);
     boardElement.scrollLeft = boardScroll.left;
@@ -782,7 +1194,9 @@
     boardElement.querySelectorAll(".wf-kb-card-list[data-label-list]").forEach(list => {
       const previousTop = columnScrolls.get(list.dataset.labelList);
       if (Number.isFinite(previousTop)) list.scrollTop = previousTop;
+      if (columnSearchQuery("label", list.dataset.labelList, current)) list.scrollTop = 0;
     });
+    updateColumnSearchStatus();
   }
 
   function render() {
@@ -848,7 +1262,9 @@
         return true;
       });
       if (index === 0) visible.sort((first, second) => Number(second.updatedAt || 0) - Number(first.updatedAt || 0));
-      return `<section class="wf-kb-column" data-column="${column.id}" style="--column:${column.color || colors[index % colors.length]}"><header draggable="true" data-column-drag="${column.id}" title="Arraste para mover esta etapa"><div><i></i><strong>${escapeHtml(column.name)}</strong><b>${visible.length}</b></div><aside><button data-add-card="${column.id}" title="Adicionar contato">+</button><button data-edit-column="${column.id}" title="Editar etapa">•••</button></aside></header>${index === 0 ? `<label class="wf-kb-column-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="m16 16 5 5"></path></svg><input id="wf-kb-inbox-search" type="search" value="${escapeHtml(inboxSearch)}" placeholder="Buscar nome ou número"></label>${inboxFiltersHtml}` : ""}<div class="wf-kb-card-list" data-drop="${column.id}">${visible.map(card => cardTemplate(card, column.id)).join("")}${visible.length ? "" : `<button class="wf-kb-empty" data-add-card="${column.id}" type="button">+ Adicionar contato</button>`}</div></section>`;
+      const query = columnSearchQuery("board", column.id, current);
+      const { ordered: displayedCards } = prioritizeColumnMatches(visible, query);
+      return `<section class="wf-kb-column" data-column="${column.id}" style="--column:${column.color || colors[index % colors.length]}"><header draggable="true" data-column-drag="${column.id}" title="Arraste para mover esta etapa"><div><i></i><strong>${escapeHtml(column.name)}</strong><b>${visible.length}</b></div><aside><button data-add-card="${column.id}" title="Adicionar contato">+</button><button data-edit-column="${column.id}" title="Editar etapa">•••</button></aside></header>${index === 0 ? `<label class="wf-kb-column-search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="m16 16 5 5"></path></svg><input id="wf-kb-inbox-search" type="search" value="${escapeHtml(inboxSearch)}" placeholder="Buscar nome ou número"></label>${inboxFiltersHtml}` : ""}<div class="wf-kb-card-list" data-drop="${column.id}">${displayedCards.map(card => cardTemplate(card, column.id, { searchMatch: Boolean(query) && matchesColumnSearch(card, query), disableDrag: Boolean(query) })).join("")}${visible.length ? "" : `<button class="wf-kb-empty" data-add-card="${column.id}" type="button">+ Adicionar contato</button>`}</div></section>`;
     }).join("") + `<button id="wf-kb-inline-column" type="button">+ Adicionar etapa</button>`;
     decorateRenderedCards(current, boardElement);
     boardElement.scrollLeft = boardScroll.left;
@@ -856,12 +1272,19 @@
     boardElement.querySelectorAll(".wf-kb-card-list[data-drop]").forEach(list => {
       const previousTop = columnScrolls.get(list.dataset.drop);
       if (Number.isFinite(previousTop)) list.scrollTop = previousTop;
+      if (columnSearchQuery("board", list.dataset.drop, current)) list.scrollTop = 0;
     });
+    updateColumnSearchStatus();
   }
 
   async function sync({ silent = false } = {}) {
+    if (labelMutationsInFlight) {
+      scheduleLabelResync(800);
+      return;
+    }
     if (syncing) return;
     syncing = true;
+    const startedLabelMutationRevision = labelMutationRevision;
     const targetBoardId = selectedBoardId;
     const button = document.querySelector("#wf-kb-sync");
     const oldText = button.textContent;
@@ -869,6 +1292,10 @@
     button.textContent = "Sincronizando...";
     try {
       const response = await window.WFBridge.command("LIST_KANBAN_CHATS", {}, 90000);
+      if (startedLabelMutationRevision !== labelMutationRevision || labelMutationsInFlight) {
+        scheduleLabelResync(800);
+        return;
+      }
       const chats = response.result?.chats || [];
       const current = boards.find(item => item.id === targetBoardId);
       if (!current) return;
@@ -1241,7 +1668,26 @@
     if (!column || !card) return;
     actionColumn = column;
     actionCard = card;
+    actionLabel = null;
     document.querySelector("#wf-kb-action-name").textContent = card.name || "Contato";
+    document.querySelector("#wf-kb-action-edit").hidden = false;
+    document.querySelector("#wf-kb-action-delete").hidden = false;
+    document.querySelector("#wf-kb-action-remove-label").hidden = true;
+    const menu = document.querySelector("#wf-kb-card-actions");
+    document.querySelector("#wf-kb-column-actions").hidden = true;
+    menu.hidden = false;
+    positionActions(menu, trigger, 280);
+  }
+
+  function showLabelCardActions(card, label, trigger) {
+    if (!card || !label) return;
+    actionColumn = null;
+    actionCard = card;
+    actionLabel = { ...label };
+    document.querySelector("#wf-kb-action-name").textContent = card.name || "Contato";
+    document.querySelector("#wf-kb-action-edit").hidden = true;
+    document.querySelector("#wf-kb-action-delete").hidden = true;
+    document.querySelector("#wf-kb-action-remove-label").hidden = false;
     const menu = document.querySelector("#wf-kb-card-actions");
     document.querySelector("#wf-kb-column-actions").hidden = true;
     menu.hidden = false;
@@ -1262,6 +1708,10 @@
     } : null;
     document.querySelector("#wf-kb-card-actions").hidden = true;
     document.querySelector("#wf-kb-column-action-name").textContent = column.name;
+    const isLabel = column.kind === "label";
+    document.querySelector("#wf-kb-column-action-edit span").textContent = isLabel ? "Editar etiqueta" : "Editar etapa";
+    document.querySelector("#wf-kb-column-action-clear span").textContent = isLabel ? "Limpar etiqueta" : "Limpar etapa";
+    document.querySelector("#wf-kb-column-action-delete span").textContent = isLabel ? "Excluir etiqueta" : "Excluir etapa";
     const menu = document.querySelector("#wf-kb-column-actions");
     menu.hidden = false;
     positionActions(menu, trigger, 210);
@@ -1295,7 +1745,7 @@
     const targets = column.cards.filter(card => card.chatId).map(card => ({ chatId: card.chatId, chatName: card.name || card.phone || "Contato" }));
     const anchorRect = columnActionAnchorRect;
     closeColumnActions();
-    if (!targets.length) return alert("Esta etapa não possui contatos disponíveis para o disparo.");
+    if (!targets.length) return alert(`${column.kind === "label" ? "Esta etiqueta" : "Esta etapa"} não possui contatos disponíveis para o disparo.`);
     window.dispatchEvent(new CustomEvent("WF_OPEN_BULK_SCHEDULE", { detail: { columnId: column.id, columnName: column.name, targets, anchorRect } }));
   }
 
@@ -1317,10 +1767,59 @@
     columnActionAnchorRect = null;
   }
 
+  function updateColumnSearchStatus() {
+    const status = document.querySelector("#wf-kb-column-search-status");
+    if (!status || !columnSearch) return;
+    if (!columnSearch.query.trim()) {
+      status.textContent = "Digite um nome ou número";
+      return;
+    }
+    const list = [...document.querySelectorAll("#wf-kb-board .wf-kb-card-list")].find(node =>
+      (columnSearch.kind === "label" ? node.dataset.labelList : node.dataset.drop) === columnSearch.key
+    );
+    const count = list?.querySelectorAll(".wf-kb-search-match").length || 0;
+    status.textContent = count
+      ? `${count} contato${count === 1 ? "" : "s"} encontrado${count === 1 ? "" : "s"} no topo`
+      : "Nenhum contato encontrado";
+  }
+
+  function closeColumnSearch(rerender = true) {
+    const hadQuery = Boolean(columnSearch?.query);
+    columnSearch = null;
+    const popover = document.querySelector("#wf-kb-column-search-popover");
+    if (popover) popover.hidden = true;
+    if (rerender && hadQuery && !document.querySelector("#wf-kanban-panel")?.hidden) render();
+  }
+
+  function showColumnSearch(column, anchorRect) {
+    const current = board();
+    if (!column || !current) return;
+    const kind = column.kind === "label" ? "label" : "board";
+    const key = String(kind === "label" ? column.labelKey : column.id);
+    const previousQuery = columnSearch?.kind === kind && columnSearch.key === key && columnSearch.boardId === current.id
+      ? columnSearch.query : "";
+    columnSearch = { kind, key, boardId: current.id, query: previousQuery };
+    const popover = document.querySelector("#wf-kb-column-search-popover");
+    const input = document.querySelector("#wf-kb-column-search-input");
+    popover.hidden = false;
+    const width = popover.offsetWidth || 245;
+    const height = popover.offsetHeight || 105;
+    const left = Math.max(8, Math.min((anchorRect?.right || window.innerWidth / 2) - width, window.innerWidth - width - 8));
+    const below = (anchorRect?.bottom || 80) + 6;
+    const top = below + height <= window.innerHeight - 8 ? below : Math.max(8, (anchorRect?.top || 80) - height - 6);
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+    input.value = previousQuery;
+    render();
+    input.focus();
+    input.select();
+  }
+
   function closeCardActions() {
     document.querySelector("#wf-kb-card-actions").hidden = true;
     actionColumn = null;
     actionCard = null;
+    actionLabel = null;
   }
 
   async function sendPopupMessage() {
@@ -1348,6 +1847,66 @@
     }
   }
 
+  async function removeActionCardLabel() {
+    const card = actionCard;
+    const label = actionLabel;
+    if (!card || !label) return;
+    const chatId = String(card.chatId || "");
+    const cardKey = cardIdentity(card);
+    if (!String(label.id || "").trim() || !chatId.includes("@")) {
+      closeCardActions();
+      alert("Não foi possível identificar a etiqueta ou o contato no WhatsApp. Clique em Sincronizar e tente novamente.");
+      return;
+    }
+    if (!cardHasRemovableLabel(card, label)) {
+      closeCardActions();
+      alert("A etiqueta deste contato está desatualizada ou ambígua. Clique em Sincronizar antes de remover.");
+      return;
+    }
+    const chatIds = [...new Set(boards.flatMap(item => (item.columns || []).flatMap(column =>
+      (column.cards || []).filter(candidate =>
+        cardIdentity(candidate) === cardKey && cardHasRemovableLabel(candidate, label)
+      ).map(candidate => String(candidate.chatId || ""))
+    )).filter(candidateChatId => candidateChatId.includes("@")))];
+    if (!beginLabelMutation()) return alert("Aguarde a alteração atual da etiqueta terminar.");
+    try {
+      pendingLabelCardRemoval = { cardKey, label };
+      closeCardActions();
+      render();
+      const response = await window.WFBridge.command("REMOVE_KANBAN_LABEL_FROM_CHATS", {
+        chatIds,
+        labelId: label.id
+      }, 120000);
+      const removedChatIds = Array.isArray(response.result?.removedChatIds)
+        ? response.result.removedChatIds.map(String)
+        : [];
+      const confirmedChatIds = chatIds.filter(candidateChatId => removedChatIds.includes(candidateChatId));
+      if (!confirmedChatIds.length) {
+        throw new Error("O WhatsApp não confirmou a remoção da etiqueta deste contato. Sincronize e tente novamente.");
+      }
+      removeConfirmedCardLabelReferences(label, confirmedChatIds);
+      pendingLabelCardRemoval = null;
+      render();
+      try {
+        await save();
+      } catch (error) {
+        console.error("[WA Flow] A etiqueta foi removida, mas o Kanban não salvou o novo estado.", error);
+        alert("A etiqueta foi removida no WhatsApp, mas não foi possível salvar o Kanban. Clique em Sincronizar.");
+      }
+      if (confirmedChatIds.length < chatIds.length) {
+        alert("O WhatsApp removeu a etiqueta apenas de parte das conversas deste contato. Sincronize e tente novamente nas que permaneceram.");
+      }
+    } catch (error) {
+      pendingLabelCardRemoval = null;
+      try { render(); } catch (renderError) {
+        console.error("[WA Flow] Não foi possível restaurar o card no Kanban.", renderError);
+      }
+      alert(error?.message || "Não foi possível remover a etiqueta deste contato no WhatsApp.");
+    } finally {
+      finishLabelMutation();
+    }
+  }
+
   function bind() {
     const panel = document.querySelector("#wf-kanban-panel");
     document.querySelector("#wf-kanban-button").onclick = () => {
@@ -1355,6 +1914,7 @@
       panel.hidden = !willOpen;
       document.querySelector("#wf-kanban-button").classList.toggle("active", willOpen);
       if (!willOpen) {
+        closeColumnSearch(false);
         closeRealWhatsappChat();
         document.querySelector("#wf-kb-chat-modal").hidden = true;
         document.querySelector("#wf-kb-card-actions").hidden = true;
@@ -1372,8 +1932,11 @@
       const boardNode = document.querySelector("#wf-kb-board");
       closeCardActions();
       closeColumnActions();
+      closeColumnSearch(false);
       dragging = null;
       draggingColumnId = "";
+      draggingLabelColumnKey = "";
+      draggingLabelCard = null;
       if (boardNode) {
         boardNode.scrollLeft = 0;
         boardNode.scrollTop = 0;
@@ -1405,6 +1968,28 @@
       if (event.target.closest("#wf-kb-inline-column")) return addColumn();
       const open = event.target.closest("[data-open-card]"); if (open) return openRealWhatsappChat(locateCard(open.dataset.openColumn, open.dataset.openCard));
       const edit = event.target.closest("[data-edit-card]"); if (edit) { const column = board().columns.find(item => item.id === edit.dataset.cardColumn); const card = column?.cards.find(item => item.id === edit.dataset.editCard); showCardActions(column, card, edit); return; }
+      const editLabelCard = event.target.closest("[data-edit-label-card]");
+      if (editLabelCard && viewMode === "labels") {
+        const current = board();
+        const column = current?.columns.find(item => item.id === editLabelCard.dataset.cardColumn);
+        const card = column?.cards.find(item => item.id === editLabelCard.dataset.editLabelCard);
+        const labelKey = editLabelCard.dataset.cardLabel;
+        const label = labelsForBoard(current).find(item =>
+          [labelViewLabelKey(item), ...labelViewLabelAliases(item)].includes(labelKey)
+        );
+        if (card && label && cardHasLabel(card, label)) showLabelCardActions(card, label, editLabelCard);
+        return;
+      }
+      const editLabelColumn = event.target.closest("[data-edit-label-column]");
+      if (editLabelColumn) {
+        const current = board();
+        const labelKey = editLabelColumn.dataset.editLabelColumn;
+        const label = labelsForBoard(current).find(item =>
+          [labelViewLabelKey(item), ...labelViewLabelAliases(item)].includes(labelKey)
+        );
+        if (label) showColumnActions(labelActionTargetForBoard(current, label), editLabelColumn);
+        return;
+      }
       const editColumn = event.target.closest("[data-edit-column]"); if (editColumn) { const column = board().columns.find(item => item.id === editColumn.dataset.editColumn); showColumnActions(column, editColumn); return; }
     };
     document.querySelector("#wf-kb-board").oninput = event => {
@@ -1421,11 +2006,85 @@
       document.querySelectorAll(".wf-kb-card.drop-before,.wf-kb-card.drop-after").forEach(card => card.classList.remove("drop-before", "drop-after"));
       document.querySelectorAll(".wf-kb-card-list.drop-at-end").forEach(list => list.classList.remove("drop-at-end"));
     };
-    boardNode.ondragstart = event => { if (viewMode === "labels") { event.preventDefault(); return; } const card = event.target.closest("[data-card]"); if (card) { dragging = { cardId: card.dataset.card, from: card.dataset.from }; card.classList.add("dragging"); return; } const header = event.target.closest("[data-column-drag]"); if (!header || event.target.closest("button")) { event.preventDefault(); return; } draggingColumnId = header.dataset.columnDrag; header.closest(".wf-kb-column")?.classList.add("column-dragging"); event.dataTransfer.effectAllowed = "move"; };
+    boardNode.ondragstart = event => {
+      if (viewMode === "labels") {
+        const card = event.target.closest("[data-label-card]");
+        if (card) {
+          if (columnSearchQuery("label", card.dataset.labelSource, board())) { event.preventDefault(); return; }
+          draggingLabelCard = { cardKey: card.dataset.labelCard, labelKey: card.dataset.labelSource };
+          card.classList.add("dragging");
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", draggingLabelCard.cardKey);
+          }
+          return;
+        }
+        const header = event.target.closest("[data-label-column-drag]");
+        if (!header || event.target.closest("button")) { event.preventDefault(); return; }
+        draggingLabelColumnKey = header.dataset.labelColumnDrag;
+        header.closest(".wf-kb-column")?.classList.add("column-dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", draggingLabelColumnKey);
+        }
+        return;
+      }
+      const card = event.target.closest("[data-card]");
+      if (card) {
+        if (columnSearchQuery("board", card.closest("[data-drop]")?.dataset.drop, board())) { event.preventDefault(); return; }
+        dragging = { cardId: card.dataset.card, from: card.dataset.from };
+        card.classList.add("dragging");
+        return;
+      }
+      const header = event.target.closest("[data-column-drag]");
+      if (!header || event.target.closest("button")) { event.preventDefault(); return; }
+      draggingColumnId = header.dataset.columnDrag;
+      header.closest(".wf-kb-column")?.classList.add("column-dragging");
+      event.dataTransfer.effectAllowed = "move";
+    };
     boardNode.ondragover = event => {
+      if (viewMode === "labels") {
+        if (draggingLabelColumnKey) {
+          const target = event.target.closest(".wf-kb-label-column");
+          if (!target || target.dataset.labelColumn === draggingLabelColumnKey) return;
+          event.preventDefault();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+          document.querySelectorAll(".wf-kb-column.column-over").forEach(item => item.classList.remove("column-over"));
+          target.classList.add("column-over");
+          return;
+        }
+        if (!draggingLabelCard) return;
+        const list = event.target.closest("[data-label-list]");
+        if (!list) {
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+          document.querySelectorAll(".wf-kb-card-list.over").forEach(item => item.classList.remove("over"));
+          clearCardDropIndicators();
+          return;
+        }
+        if (columnSearchQuery("label", list.dataset.labelList, board())) {
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+          return;
+        }
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        list.classList.add("over");
+        clearCardDropIndicators();
+        const targetCard = event.target.closest("[data-label-card]");
+        if (targetCard && targetCard.dataset.labelCard !== draggingLabelCard.cardKey) {
+          const rect = targetCard.getBoundingClientRect();
+          targetCard.classList.add(event.clientY < rect.top + rect.height / 2 ? "drop-before" : "drop-after");
+        } else if (!targetCard) {
+          list.classList.add("drop-at-end");
+        }
+        return;
+      }
       if (draggingColumnId) { const target = event.target.closest(".wf-kb-column"); if (!target || target.dataset.column === draggingColumnId) return; event.preventDefault(); document.querySelectorAll(".wf-kb-column.column-over").forEach(item => item.classList.remove("column-over")); target.classList.add("column-over"); return; }
       const list = event.target.closest("[data-drop]");
       if (!list || !dragging) return;
+      if (columnSearchQuery("board", list.dataset.drop, board())) {
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        return;
+      }
       event.preventDefault();
       list.classList.add("over");
       clearCardDropIndicators();
@@ -1437,8 +2096,111 @@
         list.classList.add("drop-at-end");
       }
     };
-    boardNode.ondragleave = event => { const list = event.target.closest("[data-drop]"); if (list && !list.contains(event.relatedTarget)) { list.classList.remove("over"); clearCardDropIndicators(); } };
+    boardNode.ondragleave = event => { const list = event.target.closest("[data-drop],[data-label-list]"); if (list && !list.contains(event.relatedTarget)) { list.classList.remove("over"); clearCardDropIndicators(); } };
     boardNode.ondrop = async event => {
+      if (viewMode === "labels") {
+        if (draggingLabelColumnKey) {
+          const target = event.target.closest(".wf-kb-label-column");
+          if (!target || target.dataset.labelColumn === draggingLabelColumnKey) return;
+          event.preventDefault();
+          const current = board();
+          const layout = ensureLabelLayout(current);
+          const orderedLabels = orderItemsBySavedKeys(labelsForBoard(current), layout.columnOrder, labelViewLabelKey, labelViewLabelAliases);
+          const order = orderedLabels.map(labelViewLabelKey);
+          const sourceIndex = order.indexOf(draggingLabelColumnKey);
+          const targetKey = target.dataset.labelColumn;
+          if (sourceIndex >= 0 && order.includes(targetKey)) {
+            const rect = target.getBoundingClientRect();
+            const placeAfter = event.clientX > rect.left + rect.width / 2;
+            const [movedKey] = order.splice(sourceIndex, 1);
+            let insertIndex = order.indexOf(targetKey);
+            if (placeAfter) insertIndex++;
+            order.splice(insertIndex, 0, movedKey);
+            const canonicalLabels = new Map();
+            orderedLabels.forEach(label => {
+              const primary = labelViewLabelKey(label);
+              [primary, ...labelViewLabelAliases(label)].forEach(key => canonicalLabels.set(key, primary));
+            });
+            layout.columnOrder = mergeReorderedActiveKeys(
+              layout.columnOrder,
+              order,
+              key => canonicalLabels.get(String(key)) || ""
+            );
+          }
+          draggingLabelColumnKey = "";
+          await save();
+          render();
+          return;
+        }
+        if (!draggingLabelCard) return;
+        const list = event.target.closest("[data-label-list]");
+        if (!list) return;
+        if (columnSearchQuery("label", list.dataset.labelList, board())) { draggingLabelCard = null; clearCardDropIndicators(); return; }
+        event.preventDefault();
+        if (list.dataset.labelList !== draggingLabelCard.labelKey) {
+          const moving = draggingLabelCard;
+          const targetCardNode = event.target.closest("[data-label-card]");
+          const placeAfter = targetCardNode
+            ? event.clientY > targetCardNode.getBoundingClientRect().top + targetCardNode.getBoundingClientRect().height / 2
+            : true;
+          draggingLabelCard = null;
+          clearCardDropIndicators();
+          await moveLabelCardBetweenColumns(board(), {
+            cardKey: moving.cardKey,
+            sourceKey: moving.labelKey,
+            targetKey: list.dataset.labelList,
+            targetCardKey: targetCardNode?.dataset.labelCard || "",
+            placeAfter
+          });
+          return;
+        }
+        const current = board();
+        const layout = ensureLabelLayout(current);
+        const label = labelsForBoard(current).find(item =>
+          [labelViewLabelKey(item), ...labelViewLabelAliases(item)].includes(draggingLabelCard.labelKey)
+        );
+        if (!label) { draggingLabelCard = null; render(); return; }
+        const order = orderItemsBySavedKeys(
+          labelEntriesForBoard(current, label),
+          savedCardOrderForLabel(layout, label),
+          entry => labelViewCardKey(entry.card)
+        ).map(entry => labelViewCardKey(entry.card));
+        const sourceIndex = order.indexOf(draggingLabelCard.cardKey);
+        const directTargetCardNode = event.target.closest("[data-label-card]");
+        const targetCardNode = directTargetCardNode || (search
+          ? [...list.querySelectorAll("[data-label-card]")].filter(node => node.dataset.labelCard !== draggingLabelCard.cardKey).at(-1)
+          : null);
+        const targetCardKey = targetCardNode?.dataset.labelCard;
+        if (targetCardKey === draggingLabelCard.cardKey) {
+          draggingLabelCard = null;
+          render();
+          return;
+        }
+        if (sourceIndex >= 0) {
+          const placeAfter = targetCardNode
+            ? event.clientY > targetCardNode.getBoundingClientRect().top + targetCardNode.getBoundingClientRect().height / 2
+            : true;
+          const shouldPlaceAfter = !directTargetCardNode && targetCardNode ? true : placeAfter;
+          const [movedKey] = order.splice(sourceIndex, 1);
+          let insertIndex = targetCardKey ? order.indexOf(targetCardKey) : order.length;
+          if (insertIndex < 0) insertIndex = order.length;
+          if (targetCardKey && shouldPlaceAfter) insertIndex++;
+          order.splice(insertIndex, 0, movedKey);
+          const activeCardKeys = new Set(order);
+          layout.cardOrderByLabel[draggingLabelCard.labelKey] = mergeReorderedActiveKeys(
+            savedCardOrderForLabel(layout, label),
+            order,
+            key => activeCardKeys.has(String(key)) ? String(key) : ""
+          );
+          labelViewLabelAliases(label).forEach(alias => {
+            if (alias !== draggingLabelCard.labelKey) delete layout.cardOrderByLabel[alias];
+          });
+        }
+        draggingLabelCard = null;
+        await save();
+        render();
+        return;
+      }
       if (draggingColumnId) {
         const target = event.target.closest(".wf-kb-column");
         if (!target || target.dataset.column === draggingColumnId) return;
@@ -1459,6 +2221,7 @@
       }
       const list = event.target.closest("[data-drop]");
       if (!list || !dragging) return;
+      if (columnSearchQuery("board", list.dataset.drop, board())) { dragging = null; clearCardDropIndicators(); return; }
       event.preventDefault();
       const current = board();
       const from = current.columns.find(item => item.id === dragging.from);
@@ -1484,7 +2247,7 @@
       dragging = null;
       await save(); render();
     };
-    boardNode.ondragend = () => { dragging = null; draggingColumnId = ""; clearCardDropIndicators(); document.querySelectorAll(".wf-kb-card.dragging,.wf-kb-card-list.over,.wf-kb-column.column-dragging,.wf-kb-column.column-over").forEach(item => item.classList.remove("dragging", "over", "column-dragging", "column-over")); };
+    boardNode.ondragend = () => { dragging = null; draggingColumnId = ""; draggingLabelColumnKey = ""; draggingLabelCard = null; clearCardDropIndicators(); document.querySelectorAll(".wf-kb-card.dragging,.wf-kb-card-list.over,.wf-kb-column.column-dragging,.wf-kb-column.column-over").forEach(item => item.classList.remove("dragging", "over", "column-dragging", "column-over")); };
     document.querySelector("#wf-kb-chat-close").onclick = () => document.querySelector("#wf-kb-chat-modal").hidden = true;
     document.querySelector("#wf-kb-chat-modal").onclick = event => { if (event.target.id === "wf-kb-chat-modal") event.currentTarget.hidden = true; };
     document.querySelector("#wf-kb-chat-send").onclick = sendPopupMessage;
@@ -1493,7 +2256,7 @@
     };
     document.querySelector("#wf-kb-card-actions").onclick = event => { if (event.target.id === "wf-kb-card-actions") closeCardActions(); };
     document.querySelector("#wf-kb-action-edit").onclick = async () => {
-      if (!actionCard || !actionColumn) return;
+      if (!actionCard || !actionColumn || actionLabel) return;
       const column = actionColumn;
       const card = actionCard;
       closeCardActions();
@@ -1504,7 +2267,7 @@
       await save(); render();
     };
     document.querySelector("#wf-kb-action-delete").onclick = async () => {
-      if (!actionCard || !actionColumn) return;
+      if (!actionCard || !actionColumn || actionLabel) return;
       const current = board();
       const column = actionColumn;
       const card = actionCard;
@@ -1516,6 +2279,24 @@
       closeCardActions();
       await save(); render();
     };
+    document.querySelector("#wf-kb-action-remove-label").onclick = removeActionCardLabel;
+    document.querySelector("#wf-kb-column-action-search").onclick = () => {
+      const column = columnActionTarget;
+      const anchorRect = columnActionAnchorRect;
+      closeColumnActions();
+      showColumnSearch(column, anchorRect);
+    };
+    document.querySelector("#wf-kb-column-search-input").oninput = event => {
+      if (!columnSearch) return;
+      columnSearch.query = event.target.value;
+      render();
+    };
+    document.querySelector("#wf-kb-column-search-input").onkeydown = event => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeColumnSearch();
+    };
+    document.querySelector("#wf-kb-column-search-close").onclick = () => closeColumnSearch();
     document.querySelector("#wf-kb-column-action-bulk").onclick = () => openBulkSchedule(columnActionTarget);
     document.querySelectorAll("[data-bulk-kind]").forEach(button => { button.onclick = () => setBulkKind(button.dataset.bulkKind); });
     document.querySelector("#wf-kb-bulk-close").onclick = closeBulkModal;
@@ -1580,6 +2361,61 @@
     document.querySelector("#wf-kb-column-action-edit").onclick = async () => {
       const column = columnActionTarget;
       if (!column) return;
+      if (column.kind === "label") {
+        const label = column.label || {};
+        if (!String(label.id || "").trim()) {
+          closeColumnActions();
+          return alert("Essa etiqueta ainda não foi identificada no WhatsApp. Clique em Sincronizar e tente novamente.");
+        }
+        const name = prompt("Nome da etiqueta", column.name);
+        if (!name?.trim()) return;
+        const nextName = name.trim();
+        if (nextName === String(column.name || "").trim()) {
+          closeColumnActions();
+          return;
+        }
+        const duplicate = whatsappLabelCatalog.some(candidate =>
+          !labelsRepresentSame(candidate, label) && normalizeLabelName(candidate.name) === normalizeLabelName(nextName)
+        );
+        if (duplicate) return alert("Já existe uma etiqueta com esse nome no WhatsApp.");
+        if (!beginLabelMutation()) return alert("Aguarde a alteração atual da etiqueta terminar.");
+        try {
+          const response = await window.WFBridge.command("EDIT_KANBAN_LABEL", {
+            labelId: label.id,
+            newName: nextName
+          }, 60000);
+          const updatedLabel = {
+            ...label,
+            id: String(response.result?.labelId || label.id),
+            name: String(response.result?.labelName || nextName)
+          };
+          let catalogUpdated = false;
+          whatsappLabelCatalog = whatsappLabelCatalog.map(candidate => {
+            if (!labelsRepresentSame(candidate, label)) return candidate;
+            catalogUpdated = true;
+            return { ...candidate, ...updatedLabel };
+          });
+          if (!catalogUpdated) whatsappLabelCatalog.push(updatedLabel);
+          boards.forEach(item => (item.columns || []).forEach(itemColumn => (itemColumn.cards || []).forEach(card => {
+            card.labels = (Array.isArray(card.labels) ? card.labels : []).map(candidate =>
+              labelsRepresentSame(candidate, label) ? { ...candidate, id: updatedLabel.id, name: updatedLabel.name } : candidate
+            );
+          })));
+          migrateLabelLayoutKey(label, updatedLabel);
+          closeColumnActions();
+          await Promise.all([
+            save(),
+            chrome.storage.local.set({ wfWhatsappLabels: whatsappLabelCatalog })
+          ]);
+          render();
+          setTimeout(refreshWhatsappLabelCatalog, 500);
+        } catch (error) {
+          alert(error?.message || "Não foi possível renomear a etiqueta no WhatsApp.");
+        } finally {
+          finishLabelMutation();
+        }
+        return;
+      }
       const name = prompt("Nome da etapa", column.name);
       if (!name?.trim()) return;
       column.name = name.trim();
@@ -1589,6 +2425,48 @@
       const current = board();
       const column = columnActionTarget;
       if (!current || !column) return;
+      if (column.kind === "label") {
+        const label = column.label || {};
+        if (!String(label.id || "").trim()) {
+          closeColumnActions();
+          return alert("Essa etiqueta ainda não foi identificada no WhatsApp. Clique em Sincronizar e tente novamente.");
+        }
+        const chatIds = [...new Set((column.cards || []).map(card => String(card.chatId || "")).filter(Boolean))];
+        const count = chatIds.length;
+        if (!count) {
+          closeColumnActions();
+          return alert(`A etiqueta ${column.name} já está vazia.`);
+        }
+        if (!confirm(
+          `Limpar a etiqueta ${column.name}? Ela será removida dos ${count} contato${count === 1 ? "" : "s"} carregados nesta coluna. Os contatos continuarão no Kanban e nas outras etiquetas.`
+        )) return;
+        if (!beginLabelMutation()) return alert("Aguarde a alteração atual da etiqueta terminar.");
+        try {
+          const response = await window.WFBridge.command("REMOVE_KANBAN_LABEL_FROM_CHATS", {
+            chatIds,
+            labelId: label.id
+          }, 120000);
+          const removedChatIds = Array.isArray(response.result?.removedChatIds)
+            ? response.result.removedChatIds.map(String)
+            : chatIds;
+          const failedChatIds = Array.isArray(response.result?.failedChatIds)
+            ? response.result.failedChatIds.map(String)
+            : [];
+          removeLabelReferences(label, removedChatIds);
+          closeColumnActions();
+          await save();
+          render();
+          setTimeout(refreshWhatsappLabelCatalog, 500);
+          if (failedChatIds.length) {
+            alert(`A etiqueta foi removida de ${removedChatIds.length} contato${removedChatIds.length === 1 ? "" : "s"}, mas falhou em ${failedChatIds.length}. Sincronize e tente novamente.`);
+          }
+        } catch (error) {
+          alert(error?.message || "Não foi possível limpar a etiqueta no WhatsApp.");
+        } finally {
+          finishLabelMutation();
+        }
+        return;
+      }
       const count = column.cards?.length || 0;
       if (!count) {
         closeColumnActions();
@@ -1617,6 +2495,36 @@
       const current = board();
       const column = columnActionTarget;
       if (!column) return;
+      if (column.kind === "label") {
+        const label = column.label || {};
+        if (!String(label.id || "").trim()) {
+          closeColumnActions();
+          return alert("Essa etiqueta ainda não foi identificada no WhatsApp. Clique em Sincronizar e tente novamente.");
+        }
+        const count = column.cards?.length || 0;
+        if (!confirm(
+          `Excluir a etiqueta ${column.name} do WhatsApp? Ela será removida de todos os contatos que a possuem (${count} carregado${count === 1 ? "" : "s"} nesta coluna). Os contatos não serão apagados, mas esta ação não pode ser desfeita.`
+        )) return;
+        if (!beginLabelMutation()) return alert("Aguarde a alteração atual da etiqueta terminar.");
+        try {
+          await window.WFBridge.command("DELETE_KANBAN_LABEL", { labelId: label.id }, 60000);
+          removeLabelReferences(label);
+          whatsappLabelCatalog = whatsappLabelCatalog.filter(candidate => !labelsRepresentSame(candidate, label));
+          removeLabelLayout(label);
+          closeColumnActions();
+          await Promise.all([
+            save(),
+            chrome.storage.local.set({ wfWhatsappLabels: whatsappLabelCatalog })
+          ]);
+          render();
+          setTimeout(refreshWhatsappLabelCatalog, 500);
+        } catch (error) {
+          alert(error?.message || "Não foi possível excluir a etiqueta no WhatsApp.");
+        } finally {
+          finishLabelMutation();
+        }
+        return;
+      }
       if (current.columns.length === 1) return alert("Mantenha ao menos uma etapa.");
       if (column.cards.length && !confirm("Esta etapa contém contatos. Excluir mesmo assim?")) return;
       if (!column.cards.length && !confirm(`Excluir a etapa ${column.name}?`)) return;
@@ -1652,8 +2560,8 @@
       if (stageMenu && !stageMenu.hidden && !stageMenu.contains(event.target) && !event.target.closest("#wf-kb-native-stage-badge")) stageMenu.hidden = true;
       const cardMenu = document.querySelector("#wf-kb-card-actions");
       const columnMenu = document.querySelector("#wf-kb-column-actions");
-      if (!cardMenu.hidden && !cardMenu.contains(event.target) && !event.target.closest("[data-edit-card]")) closeCardActions();
-      if (!columnMenu.hidden && !columnMenu.contains(event.target) && !event.target.closest("[data-edit-column]")) closeColumnActions();
+      if (!cardMenu.hidden && !cardMenu.contains(event.target) && !event.target.closest("[data-edit-card],[data-edit-label-card]")) closeCardActions();
+      if (!columnMenu.hidden && !columnMenu.contains(event.target) && !event.target.closest("[data-edit-column],[data-edit-label-column]")) closeColumnActions();
     });
   }
 
@@ -1664,10 +2572,12 @@
   });
 
   async function refreshWhatsappLabelCatalog() {
-    if (labelCatalogRefreshing) return;
+    if (labelCatalogRefreshing || labelMutationsInFlight) return;
     labelCatalogRefreshing = true;
+    const startedLabelMutationRevision = labelMutationRevision;
     try {
       const response = await window.WFBridge.command("LIST_KANBAN_LABELS", {}, 5000);
+      if (startedLabelMutationRevision !== labelMutationRevision || labelMutationsInFlight) return;
       const labels = Array.isArray(response.result?.labels) ? response.result.labels : [];
       const before = JSON.stringify(whatsappLabelCatalog);
       whatsappLabelCatalog = labels;

@@ -1,18 +1,66 @@
 (() => {
   if (window.__WF_CONTENT_V2__) return;
   window.__WF_CONTENT_V2__ = true;
-  const bulkProtocolVersion = 13;
+  const bulkProtocolVersion = 14;
 
   const pending = new Map();
   let bridgeReady = false;
   let bridgeError = "";
   let bridgeStage = "injecting";
   let bridgeDiagnostics = {};
+  let sessionObserved = sessionStorage.getItem("wf-session-observed") === "1";
+  let healthFailureSince = 0;
+  let healthCheckInFlight = false;
+  let healthTimer = null;
+  let recoveryReloadTimer = null;
+  let fastRecoveryTimer = null;
+  const contentStartedAt = Date.now();
+  const isScheduleFailure = item => ["failed", "skipped", "unconfirmed"].includes(item?.status);
+
+  function runtimeContextValid() {
+    try {
+      return Boolean(chrome?.runtime?.id);
+    } catch {
+      return false;
+    }
+  }
+
+  function scheduleRecoveryReload(reason = "connection", delay = 1500) {
+    if (recoveryReloadTimer) return;
+    const now = Date.now();
+    const windowMs = 15 * 60 * 1000;
+    let history = [];
+    try {
+      history = JSON.parse(sessionStorage.getItem("wf-recovery-reloads") || "[]")
+        .map(Number)
+        .filter(timestamp => Number.isFinite(timestamp) && now - timestamp < windowMs);
+    } catch {}
+    if (history.length >= 2) {
+      console.warn("[WA Flow] Recarga automática bloqueada para evitar ciclo.", reason);
+      return;
+    }
+    history.push(now);
+    try {
+      sessionStorage.setItem("wf-recovery-reloads", JSON.stringify(history));
+      sessionStorage.setItem("wf-recovery-reason", String(reason || "connection"));
+    } catch {}
+    recoveryReloadTimer = setTimeout(() => window.location.reload(), Math.max(0, delay));
+  }
 
   function inject(file, attempt = 1) {
     if (document.querySelector(`script[data-wf-injected="${file}"]`)) return;
+    if (!runtimeContextValid()) {
+      scheduleRecoveryReload("extension-context", 250);
+      return;
+    }
     const script = document.createElement("script");
-    script.src = chrome.runtime.getURL(file);
+    try {
+      script.src = chrome.runtime.getURL(file);
+    } catch (error) {
+      console.warn("[WA Flow] Contexto da extensão foi substituído; recarregando a página.", error);
+      scheduleRecoveryReload("extension-context", 250);
+      return;
+    }
     script.dataset.wfInjected = file;
     script.onload = () => script.remove();
     script.onerror = () => {
@@ -71,6 +119,98 @@
     });
   }
 
+  function startFlowAndWait({
+    chatId,
+    flowId,
+    startIndex = 0,
+    flowContext = {},
+    replyText = "",
+    failureOwner = "engine",
+    failureSource = "scheduled-flow"
+  }, timeout = 15000) {
+    const requestId = crypto.randomUUID
+      ? crypto.randomUUID()
+      : `flow-${Date.now()}-${Math.random()}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        const error = new Error("O fluxo não confirmou a execução dentro do tempo limite.");
+        error.code = "WF_FLOW_TIMEOUT";
+        reject(error);
+      }, timeout);
+      const cleanup = () => {
+        clearTimeout(timer);
+        window.removeEventListener("WF_CHAT_CONTROL_RESULT", onResult);
+      };
+      const onResult = event => {
+        const result = event.detail || {};
+        if (result.requestId !== requestId) return;
+        cleanup();
+        if (result.ok) {
+          resolve(result);
+          return;
+        }
+        const error = new Error(result.error || "Falha ao executar o fluxo.");
+        if (result.errorCode) error.code = result.errorCode;
+        if (Number.isFinite(Number(result.failedIndex))) error.failedIndex = Number(result.failedIndex);
+        reject(error);
+      };
+      window.addEventListener("WF_CHAT_CONTROL_RESULT", onResult);
+      window.dispatchEvent(new CustomEvent("WF_CHAT_CONTROL", {
+        detail: {
+          action: "start-flow",
+          requestId,
+          chatId,
+          flowId,
+          startIndex,
+          flowContext,
+          replyText,
+          failureOwner,
+          failureSource
+        }
+      }));
+    });
+  }
+
+  async function requireServerAck(response, timeout = 15000) {
+    const result = response?.result || {};
+    const messageId = String(result.messageId || "");
+    let ack = Number(result.ack);
+    if (Number.isFinite(ack) && ack < 0) {
+      const error = new Error("O WhatsApp recusou o envio da mensagem.");
+      error.code = "WF_NEGATIVE_ACK";
+      throw error;
+    }
+    if (Number.isFinite(ack) && ack >= 1) return response;
+    if (!messageId) {
+      const error = new Error("O WhatsApp não informou o identificador da mensagem enviada.");
+      error.code = "WF_MISSING_MESSAGE_ID";
+      throw error;
+    }
+
+    const deadline = Date.now() + Math.max(1000, timeout);
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const checked = await command("CHECK_MESSAGE_ACKS", { messageIds: [messageId] }, 5000);
+      ack = Number(checked?.result?.acks?.[0]?.ack);
+      if (Number.isFinite(ack) && ack < 0) {
+        const error = new Error("O WhatsApp recusou o envio da mensagem.");
+        error.code = "WF_NEGATIVE_ACK";
+        throw error;
+      }
+      if (Number.isFinite(ack) && ack >= 1) {
+        result.ack = ack;
+        result.ackPending = false;
+        return response;
+      }
+    }
+
+    const error = new Error("Mensagem registrada localmente, mas sem confirmação do servidor do WhatsApp.");
+    error.code = "WF_ACK_UNCONFIRMED";
+    error.messageId = messageId;
+    throw error;
+  }
+
   // The current WhatsApp Web no longer exposes MsgStore/MsgCollection in every
   // build. Keep the native bridge as the primary listener, but observe newly
   // rendered inbound bubbles so automatic triggers still work in the open chat.
@@ -84,6 +224,24 @@
     const textFromBubble = bubble => Array.from(
       bubble.querySelectorAll('span[data-testid="selectable-text"]')
     ).map(node => node.innerText || node.textContent || "").join("\n").trim();
+
+    const timestampFromMetadata = metadata => {
+      const value = String(metadata || "");
+      const match = value.match(
+        /\[(\d{1,2}):(\d{2}),\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\]/
+      );
+      if (!match) return 0;
+      let year = Number(match[5]);
+      if (year < 100) year += 2000;
+      const timestamp = new Date(
+        year,
+        Number(match[4]) - 1,
+        Number(match[3]),
+        Number(match[1]),
+        Number(match[2])
+      ).getTime();
+      return Number.isFinite(timestamp) ? timestamp : 0;
+    };
 
     const processBubble = async bubble => {
       if (!(bubble instanceof Element) || seen.has(bubble)) return;
@@ -118,6 +276,14 @@
         if (!chatId) return;
 
         const metadata = String(bubble.getAttribute("data-pre-plain-text") || "");
+        const metadataTimestamp = timestampFromMetadata(metadata);
+        // O observer também enxerga mensagens antigas quando o WhatsApp
+        // redesenha a conversa. Somente bolhas recém-chegadas podem disparar
+        // automações pelo fallback visual.
+        if (
+          metadataTimestamp &&
+          (Date.now() - metadataTimestamp > 75000 || metadataTimestamp - Date.now() > 75000)
+        ) return;
         let hash = 2166136261;
         const fingerprint = `${chatId}|${metadata}|${body}`;
         for (let index = 0; index < fingerprint.length; index++) {
@@ -131,7 +297,7 @@
           body,
           fromMe: false,
           isGroup: chatId.endsWith("@g.us"),
-          timestamp: Date.now(),
+          timestamp: metadataTimestamp || Date.now(),
           source: "dom-fallback"
         };
         window.dispatchEvent(new CustomEvent("WF_INCOMING_ACTIVITY", { detail: message }));
@@ -174,12 +340,16 @@
       bridgeError = "";
       bridgeStage = "ready";
       bridgeDiagnostics = data.capabilities || {};
+      sessionObserved = true;
+      healthFailureSince = 0;
+      try { sessionStorage.setItem("wf-session-observed", "1"); } catch {}
       setBadge("engine conectada", "on");
       window.dispatchEvent(new CustomEvent("WF_BRIDGE_READY"));
       return;
     }
 
     if (data.type === "BRIDGE_ERROR") {
+      bridgeReady = false;
       bridgeError = data.error || "Falha ao carregar o motor.";
       bridgeStage = data.stage || "error";
       bridgeDiagnostics = data.capabilities || {};
@@ -228,10 +398,132 @@
     }
   });
 
-  inject("vendor-loader.js");
-  inject("page-bridge.js");
+  function visibleWhatsappSession() {
+    const side = document.querySelector("#pane-side") ||
+      document.querySelector('[data-testid="chat-list"]') ||
+      document.querySelector('#side [role="grid"]');
+    return Boolean(side && side.getClientRects().length > 0);
+  }
+
+  function visibleWhatsappLogin() {
+    const login = document.querySelector(
+      '[data-testid="qrcode"], canvas[aria-label*="QR" i], [data-ref] canvas'
+    );
+    return Boolean(login && login.getClientRects().length > 0);
+  }
+
+  async function checkConnectionHealth({ immediate = false } = {}) {
+    if (healthCheckInFlight || recoveryReloadTimer || !runtimeContextValid()) {
+      if (!runtimeContextValid()) scheduleRecoveryReload("extension-context", 250);
+      return;
+    }
+    const hasSessionUi = visibleWhatsappSession();
+    // A tela de QR/login não deve entrar em ciclo de recarga.
+    if (
+      !sessionObserved ||
+      visibleWhatsappLogin() ||
+      globalThis.navigator?.onLine === false
+    ) return;
+    // Em um carregamento normal, dê tempo para o painel aparecer. Se uma aba
+    // antiga voltar do standby sem painel algum, trate como página travada.
+    if (!hasSessionUi && Date.now() - contentStartedAt < 90000) return;
+
+    healthCheckInFlight = true;
+    try {
+      const result = await command("PING", {}, immediate ? 4000 : 6500);
+      const healthy = Boolean(result?.ready && result?.authenticated && result?.connected);
+      bridgeReady = healthy;
+      if (healthy) {
+        healthFailureSince = 0;
+        if (fastRecoveryTimer) {
+          clearTimeout(fastRecoveryTimer);
+          fastRecoveryTimer = null;
+        }
+        bridgeError = "";
+        bridgeStage = "ready";
+        return;
+      }
+      if (!healthFailureSince) healthFailureSince = Date.now();
+    } catch (error) {
+      bridgeReady = false;
+      if (!healthFailureSince) healthFailureSince = Date.now();
+      bridgeError = error?.message || String(error);
+    } finally {
+      healthCheckInFlight = false;
+    }
+
+    // When a suspended tab becomes visible again, do not make the user wait
+    // for the regular 45-second watchdog. Give WhatsApp a short grace period
+    // to reconnect by itself, then confirm once more before reloading.
+    if (immediate && healthFailureSince && !fastRecoveryTimer) {
+      fastRecoveryTimer = setTimeout(() => {
+        fastRecoveryTimer = null;
+        checkConnectionHealth({ immediate: true });
+      }, 5000);
+      if (Date.now() - healthFailureSince < 40000) {
+        healthFailureSince = Date.now() - 40000;
+      }
+    }
+
+    if (healthFailureSince && Date.now() - healthFailureSince >= 45000) {
+      setBadge("reconectando WhatsApp", "work");
+      scheduleRecoveryReload("whatsapp-standby", 750);
+    }
+  }
+
+  function queueHealthCheck() {
+    setTimeout(() => checkConnectionHealth({ immediate: true }), 250);
+  }
+
+  window.addEventListener("online", queueHealthCheck);
+  window.addEventListener("focus", queueHealthCheck);
+  window.addEventListener("pageshow", queueHealthCheck);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") queueHealthCheck();
+  });
+  healthTimer = setInterval(checkConnectionHealth, 15000);
+
+  // Let WhatsApp finish login/history sync before loading automation hooks.
+  // A script download or WA-JS isInjected flag is not an operational session.
+  bridgeStage = "waiting-for-whatsapp";
+  let sessionVisibleSince = 0;
+  const sessionTimer = setInterval(() => {
+    const side = document.querySelector("#pane-side") ||
+      document.querySelector('[data-testid="chat-list"]') ||
+      document.querySelector('#side [role="grid"]');
+    const visible = side && side.getClientRects().length > 0;
+    if (!visible) {
+      sessionVisibleSince = 0;
+      return;
+    }
+    if (!sessionVisibleSince) sessionVisibleSince = Date.now();
+    if (Date.now() - sessionVisibleSince < 2000) return;
+    clearInterval(sessionTimer);
+    bridgeStage = "injecting";
+    inject("vendor-loader.js");
+    inject("page-bridge.js");
+  }, 1000);
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Keep this response independent from WA-JS/page-bridge. A renderer crash
+    // also kills this listener, which lets the service worker distinguish a
+    // dead WhatsApp tab from a disconnected/logged-out session that is still
+    // rendering normally.
+    if (request.type === "WF_WATCHDOG_HEALTH") {
+      sendResponse({
+        alive: true,
+        ui: visibleWhatsappLogin()
+          ? "login"
+          : visibleWhatsappSession()
+          ? "session"
+          : "loading",
+        bridgeReady,
+        startedAt: contentStartedAt,
+        checkedAt: Date.now()
+      });
+      return;
+    }
+
     if (request.type === "WF_BULK_READY") {
       command("PING", {}, 2500)
         .then(result => {
@@ -358,7 +650,7 @@
     }
 
     if (request.type === "WF_KANBAN_CHATS") {
-      command("LIST_KANBAN_CHATS", {}, 90000)
+      command('LIST_KANBAN_CHATS', { includeGroups: Boolean(request.includeGroups), forBulk: Boolean(request.forBulk) }, 90000)
         .then(response => sendResponse({ ok: true, chats: response.result?.chats || [] }))
         .catch(error => sendResponse({ ok: false, error: error?.message || String(error) }));
       return true;
@@ -504,24 +796,29 @@
               </div>
             </div>
             <div id="wf-schedule-message-fields">
-              <div class="wf-schedule-message-wrap">
+              <div class="wf-schedule-message-wrap" data-schedule-variant-row="0">
                 <textarea id="wf-schedule-message" rows="4" maxlength="4096" aria-label="Mensagem"
                   placeholder="Digite a mensagem que será enviada ou use /atalho"></textarea>
                 <div id="wf-message-suggestions" class="wf-message-suggestions" hidden></div>
+                <div class="wf-schedule-variant-attachment">
+                  <label class="wf-schedule-file" title="Anexar imagem, vídeo, áudio ou documento">
+                    <input id="wf-schedule-file" type="file" data-schedule-variant-file="0"
+                      accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+                      aria-label="Anexar arquivo à mensagem principal">
+                    <span aria-hidden="true">📎</span><span>Anexar</span>
+                  </label>
+                  <small id="wf-schedule-file-name" class="wf-schedule-file-name" hidden></small>
+                  <button class="wf-schedule-file-remove" type="button" data-remove-schedule-file
+                    title="Remover anexo" aria-label="Remover anexo" hidden>×</button>
+                </div>
               </div>
               <div id="wf-schedule-variations" class="wf-schedule-variations"></div>
               <div class="wf-schedule-template-row">
-                <button id="wf-save-schedule-template" class="wf-save-schedule-template" type="button"
-                  title="Salvar esta configuração" aria-label="Salvar configuração">+</button>
                 <div id="wf-schedule-template-list" class="wf-schedule-template-list"></div>
               </div>
               <div class="wf-schedule-attachment-row">
-                <label class="wf-schedule-file" title="Anexar imagem, vídeo, áudio ou documento">
-                  <input id="wf-schedule-file" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
-                    aria-label="Anexar imagem, vídeo, áudio ou documento">
-                  <span aria-hidden="true">📎</span><span>Anexar</span>
-                </label>
-                <small id="wf-schedule-file-name" class="wf-schedule-file-name" hidden></small>
+                <button id="wf-save-schedule-template" class="wf-save-schedule-template" type="button"
+                  title="Salvar esta configuração" aria-label="Salvar configuração">+</button>
                 <button id="wf-add-schedule-variation" class="wf-add-schedule-variation" type="button">
                   + Variação
                 </button>
@@ -721,7 +1018,7 @@
     document.body.appendChild(panel);
     let activeChatId = "";
     let activeChatName = "";
-    let editingScheduleMedia = null;
+    let editingScheduleVariantMedia = [];
     let scheduleKind = "message";
     let scheduleTemplates = [];
     let messageTemplates = [];
@@ -773,11 +1070,7 @@
     }
 
     function hasValidExtensionContext() {
-      try {
-        return Boolean(chrome?.runtime?.id);
-      } catch {
-        return false;
-      }
+      return runtimeContextValid();
     }
 
     function disposeInvalidExtensionContext() {
@@ -790,10 +1083,19 @@
         chatBadgeSyncTimer = null;
       }
       if (chatBadgeInteractionTimer) clearTimeout(chatBadgeInteractionTimer);
+      if (healthTimer) {
+        clearInterval(healthTimer);
+        healthTimer = null;
+      }
+      if (fastRecoveryTimer) {
+        clearTimeout(fastRecoveryTimer);
+        fastRecoveryTimer = null;
+      }
       chatControlDockObserver?.disconnect();
       document.removeEventListener("pointerup", queueChatBadgeSync, true);
       panel.remove();
       root.remove();
+      scheduleRecoveryReload("extension-context", 250);
     }
 
     function positionChatControlPanel() {
@@ -947,9 +1249,13 @@
         const messages = Array.isArray(stored.wfScheduledMessages)
           ? stored.wfScheduledMessages
           : [];
+        const targetsActiveChat = item => Boolean(activeChatId && (
+          item.chatId === activeChatId ||
+          item.targetStates?.some(target => target.chatId === activeChatId) ||
+          item.bulkTargets?.some(target => target.chatId === activeChatId)
+        ));
         const pendingMessages = messages.filter(item =>
-          activeChatId &&
-          item.chatId === activeChatId &&
+          targetsActiveChat(item) &&
           (item.status === "pending" || item.status === "sending")
         ).length;
         const activeFlows = stored.wfRuntime?.activeFlows || {};
@@ -960,8 +1266,13 @@
         activeFlowCount.hidden = currentChatFlowCount === 0;
         activeFlowCount.title = currentChatFlowCount ? "1 fluxo ativo nesta conversa" : "";
 
-      chatControlBadge.textContent = messages.some(item => activeChatId && item.chatId === activeChatId && item.status === "failed") ? "x" : (total > 99 ? "99+" : String(total));
-      chatControlBadge.hidden = !messages.some(item => activeChatId && item.chatId === activeChatId && item.status === "failed") && total === 0;
+      const activeChatHasFailure = messages.some(item =>
+        targetsActiveChat(item) && (
+          isScheduleFailure(item) || item.targetStates?.some(target => target.chatId === activeChatId && isScheduleFailure(target))
+        )
+      );
+      chatControlBadge.textContent = activeChatHasFailure ? "x" : (total > 99 ? "99+" : String(total));
+      chatControlBadge.hidden = !activeChatHasFailure && total === 0;
         chatControlBadge.title =
           `${pendingMessages} mensagem(ns) programada(s) e ${currentChatFlowCount} fluxo ativo nesta conversa`;
       } catch (error) {
@@ -1046,7 +1357,7 @@
       scheduleVariations.innerHTML = "";
       updateScheduleVariationChances();
       scheduleEditId.value = "";
-      editingScheduleMedia = null;
+      editingScheduleVariantMedia = [];
       updateScheduleFileName();
       scheduleCancelEdit.hidden = true;
       scheduleCustomRepeat.hidden = true;
@@ -1059,6 +1370,13 @@
 
     function scheduleTextFields() {
       return [scheduleMessage, ...scheduleVariations.querySelectorAll("textarea")];
+    }
+
+    function scheduleVariantRows() {
+      return [
+        scheduleMessage.closest("[data-schedule-variant-row]"),
+        ...scheduleVariations.querySelectorAll("[data-schedule-variant-row]")
+      ].filter(Boolean);
     }
 
     function scheduleEndTimestamp(timestamp, amount, unit) {
@@ -1079,17 +1397,32 @@
         : "+ Variação";
     }
 
-    function addVariationField(value = "") {
+    function addVariationField(value = "", media = null) {
       if (scheduleTextFields().length >= 5) return;
+      const variantIndex = scheduleTextFields().length;
       const variation = document.createElement("div");
       variation.className = "wf-schedule-variation";
+      variation.dataset.scheduleVariantRow = String(variantIndex);
       variation.innerHTML = `
-        <label>Variação ${scheduleTextFields().length + 1}</label>
+        <label>Variação ${variantIndex + 1}</label>
         <textarea rows="3" maxlength="4096" placeholder="Digite outra versão ou use /atalho"></textarea>
         <button type="button" data-remove-schedule-variation title="Remover variação" aria-label="Remover variação">×</button>
+        <div class="wf-schedule-variant-attachment">
+          <label class="wf-schedule-file" title="Anexar imagem, vídeo, áudio ou documento">
+            <input type="file" data-schedule-variant-file="${variantIndex}"
+              accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+              aria-label="Anexar arquivo à variação ${variantIndex + 1}">
+            <span aria-hidden="true">📎</span><span>Anexar</span>
+          </label>
+          <small class="wf-schedule-file-name" hidden></small>
+          <button class="wf-schedule-file-remove" type="button" data-remove-schedule-file
+            title="Remover anexo" aria-label="Remover anexo" hidden>×</button>
+        </div>
       `;
       variation.querySelector("textarea").value = value;
+      editingScheduleVariantMedia[variantIndex] = media || null;
       scheduleVariations.appendChild(variation);
+      updateScheduleFileName(variation.querySelector("[data-schedule-variant-file]"));
       updateScheduleVariationChances();
     }
 
@@ -1107,7 +1440,7 @@
           ? item.bulkColumnId === bulkScheduleColumnId
           : (!Array.isArray(item.bulkTargets) && (!activeChatId || item.chatId === activeChatId)))
         .sort((a, b) => Number(a.scheduledAt) - Number(b.scheduledAt));
-      const pendingCount = messages.filter((item) => item.status === "pending").length; const hasFailed = messages.some((item) => item.status === "failed"); scheduledCount.textContent  = hasFailed ? "x" : String(pendingCount); scheduledCount.hidden = !hasFailed && pendingCount === 0;
+      const pendingCount = messages.filter((item) => item.status === "pending").length; const hasFailed = messages.some(isScheduleFailure); scheduledCount.textContent  = hasFailed ? "x" : String(pendingCount); scheduledCount.hidden = !hasFailed && pendingCount === 0;
 
       if (!messages.length) {
         scheduledList.innerHTML = `<div class="wf-scheduled-empty">Nenhuma mensagem ou fluxo programado para ${bulkScheduleColumnId ? "esta etapa" : "esta conversa"}.</div>`;
@@ -1129,11 +1462,21 @@
       };
       const statusLabels = {
         pending: "Programada", sending: "Enviando", sent: "Enviada",
-        cancelled: "Cancelada", failed: "Falhou", skipped: "Ignorada"
+        cancelled: "Cancelada", failed: "Falhou", skipped: "Ignorada",
+        unconfirmed: "Confirmando envio"
       };
       scheduledList.innerHTML = messages.map(item => {
-        const variations = Array.isArray(item.texts) ? item.texts.filter(Boolean) : [];
-        const hasVariations = variations.length > 1;
+        const legacyTexts = Array.isArray(item.texts) && item.texts.length ? item.texts : [item.text || ""];
+        const variants = (
+          Array.isArray(item.variants) && item.variants.length
+            ? item.variants
+            : legacyTexts.map((text, index) => ({
+                text,
+                media: index === 0 ? item.media || null : null
+              }))
+        ).filter(variant => variant?.text || variant?.media?.dataUrl);
+        const primaryVariant = variants[0] || { text: item.text || "", media: item.media || null };
+        const hasVariations = variants.length > 1;
         return `
         <article class="wf-scheduled-item ${escapeScheduleHtml(item.status || "pending")}${hasVariations ? " has-variations" : ""}"
           ${hasVariations ? 'data-scheduled-expandable="true" role="button" tabindex="0" aria-expanded="false"' : ""}>
@@ -1152,18 +1495,22 @@
           </div>
           ${item.type === "flow"
             ? `<div class="wf-scheduled-flow-name"><small>Fluxo programado</small><strong>⚡ ${escapeScheduleHtml(item.flowName || "Fluxo")}</strong></div>`
-            : `<p>${escapeScheduleHtml(item.text)}</p>`}
+            : primaryVariant.text ? `<p>${escapeScheduleHtml(primaryVariant.text)}</p>` : ""}
           ${Array.isArray(item.bulkTargets) ? `<div class="wf-scheduled-bulk-targets">${item.bulkTargets.length} contatos · ${escapeScheduleHtml(item.bulkColumnName || "Etapa")}</div>` : ""}
           ${hasVariations
-            ? `<div class="wf-scheduled-variations">${variations.length} mensagens possíveis <span aria-hidden="true">⌄</span></div>
+            ? `<div class="wf-scheduled-variations">${variants.length} variações possíveis <span aria-hidden="true">⌄</span></div>
                <div class="wf-scheduled-variation-list" hidden>
                  <strong>Outras variações</strong>
-                 ${variations.slice(1).map((text, index) => `
-                   <div><small>Variação ${index + 2}</small><p>${escapeScheduleHtml(text)}</p></div>
+                 ${variants.slice(1).map((variant, index) => `
+                   <div>
+                     <small>Variação ${index + 2}</small>
+                     ${variant.text ? `<p>${escapeScheduleHtml(variant.text)}</p>` : ""}
+                     ${variant.media ? `<span class="wf-scheduled-file">📎 ${escapeScheduleHtml(variant.media.fileName)}</span>` : ""}
+                   </div>
                  `).join("")}
                </div>`
             : ""}
-          ${item.media ? `<div class="wf-scheduled-file">📎 ${escapeScheduleHtml(item.media.fileName)}</div>` : ""}
+          ${primaryVariant.media ? `<div class="wf-scheduled-file">📎 ${escapeScheduleHtml(primaryVariant.media.fileName)}</div>` : ""}
           <div class="wf-scheduled-meta">
             <span>${
               item.repeat === "custom"
@@ -1181,7 +1528,7 @@
                 <button type="button" data-schedule-send-now="${item.id}">Enviar</button>
                 <button type="button" data-schedule-edit="${item.id}">Editar</button>
                 <button type="button" data-schedule-delete="${item.id}">Excluir</button>
-              ` : ["failed", "skipped"].includes(item.status) ? `
+              ` : ["failed", "skipped", "unconfirmed"].includes(item.status) ? `
                 <button type="button" data-schedule-retry="${item.id}">Tentar novamente</button>
                   <button type="button" data-schedule-edit="${item.id}">Editar</button>
                 <button type="button" data-schedule-delete="${item.id}">Excluir</button>
@@ -1456,13 +1803,24 @@
     bulkSendNow.addEventListener("click", async () => {
       const targets = [...bulkScheduleTargets];
       if (!targets.length || bulkSendNow.disabled) return;
-      const rawTexts = scheduleKind === "message" ? scheduleTextFields().map(field => field.value.trim()) : [];
-      if (scheduleKind === "message" && rawTexts.length > 1 && rawTexts.some(value => !value)) {
-        scheduleFeedback.textContent = "Preencha todas as variações ou remova os campos vazios.";
+      let variants = [];
+      try {
+        variants = scheduleKind === "message" ? await collectScheduleVariants() : [];
+      } catch (error) {
+        scheduleFeedback.textContent = error?.message || "Não foi possível ler o arquivo.";
         return;
       }
-      const texts = rawTexts.filter(Boolean);
-      if (scheduleKind === "message" && !texts.length && !scheduleFile.files?.[0] && !editingScheduleMedia) {
+      if (
+        scheduleKind === "message" &&
+        variants.length > 1 &&
+        variants.some(variant => !variant.text && !variant.media?.dataUrl)
+      ) {
+        scheduleFeedback.textContent = "Preencha o texto, anexe um arquivo ou remova a variação vazia.";
+        return;
+      }
+      variants = variants.filter(variant => variant.text || variant.media?.dataUrl);
+      const texts = variants.map(variant => variant.text);
+      if (scheduleKind === "message" && !variants.length) {
         scheduleFeedback.textContent = "Digite uma mensagem ou adicione um arquivo.";
         return;
       }
@@ -1473,25 +1831,57 @@
       if (!confirm(`Enviar agora para ${targets.length} contato${targets.length === 1 ? "" : "s"}?`)) return;
       bulkSendNow.disabled = true;
       try {
-        const media = scheduleKind === "message" ? await readScheduleFile(scheduleFile.files?.[0]) : null;
-        for (let index = 0; index < targets.length; index++) {
-          const target = targets[index];
-          scheduleFeedback.textContent = `Enviando ${index + 1} de ${targets.length}...`;
-          if (scheduleKind === "flow") {
-            window.dispatchEvent(new CustomEvent("WF_CHAT_CONTROL", { detail: { action: "start-flow", chatId: target.chatId, flowId: scheduleFlow.value } }));
-            continue;
-          }
-          const outgoingText = texts.length ? texts[Math.floor(Math.random() * texts.length)] : "";
-          if (media?.dataUrl) {
-            const mimeType = String(media.mimeType || "");
-            const mediaType = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("video/") ? "video" : mimeType.startsWith("audio/") ? "audio" : "document";
-            await command("SEND_FILE", { chatId: target.chatId, block: { ...media, type: mediaType, caption: outgoingText, isPtt: false } }, 60000);
-            if (outgoingText && !["image", "video"].includes(mediaType)) await command("SEND_TEXT", { chatId: target.chatId, text: outgoingText, linkPreview: true }, 60000);
-          } else {
-            await command("SEND_TEXT", { chatId: target.chatId, text: outgoingText, linkPreview: true }, 60000);
-          }
+        const media = scheduleKind === "message" ? variants[0]?.media || null : null;
+        const now = Date.now();
+        const id = crypto.randomUUID ? crypto.randomUUID() : `${now}-${Math.random()}`;
+        const flowName = scheduleFlow.selectedOptions[0]?.textContent || "Fluxo";
+        const item = {
+          id,
+          chatId: "",
+          chatName: bulkScheduleColumnName || "Etapa",
+          bulkTargets: targets.map(target => ({ chatId: target.chatId, chatName: target.chatName || "Contato" })),
+          targetStates: targets.map(target => ({
+            chatId: target.chatId,
+            chatName: target.chatName || "Contato",
+            status: "pending",
+            error: "",
+            updatedAt: now
+          })),
+          bulkColumnId: bulkScheduleColumnId,
+          bulkColumnName: bulkScheduleColumnName || "Etapa",
+          type: scheduleKind,
+          flowId: scheduleKind === "flow" ? scheduleFlow.value : "",
+          flowName: scheduleKind === "flow" ? flowName : "",
+          text: texts[0] || "",
+          texts,
+          media,
+          variants,
+          scheduledAt: now,
+          recurrenceAnchorAt: now,
+          repeat: "none",
+          repeatEvery: 1,
+          repeatUnit: "",
+          endsAt: 0,
+          cancelIfReply: false,
+          status: "pending",
+          createdAt: now,
+          updatedAt: now
+        };
+        const stored = await chrome.storage.local.get("wfScheduledMessages");
+        const queue = Array.isArray(stored.wfScheduledMessages) ? stored.wfScheduledMessages : [];
+        queue.push(item);
+        await chrome.storage.local.set({ wfScheduledMessages: queue });
+        scheduleFeedback.textContent = `Enviando para ${targets.length} contato${targets.length === 1 ? "" : "s"}...`;
+        await safelyDispatchScheduledMessages();
+        const finished = await chrome.storage.local.get("wfScheduledMessages");
+        const resultItem = (Array.isArray(finished.wfScheduledMessages) ? finished.wfScheduledMessages : [])
+          .find(candidate => candidate.id === id);
+        const failedCount = resultItem?.targetStates?.filter(isScheduleFailure).length || 0;
+        if (failedCount) {
+          scheduleFeedback.textContent = `${targets.length - failedCount} enviado${targets.length - failedCount === 1 ? "" : "s"}; ${failedCount} falha${failedCount === 1 ? "" : "s"} registrada${failedCount === 1 ? "" : "s"}.`;
+        } else {
+          scheduleFeedback.textContent = `Disparo concluído para ${targets.length} contato${targets.length === 1 ? "" : "s"}.`;
         }
-        scheduleFeedback.textContent = `Disparo concluído para ${targets.length} contato${targets.length === 1 ? "" : "s"}.`;
       } catch (error) {
         scheduleFeedback.textContent = error?.message || "Não foi possível concluir o disparo.";
       } finally {
@@ -1530,9 +1920,17 @@
     scheduleVariations.addEventListener("click", event => {
       const removeButton = event.target.closest("[data-remove-schedule-variation]");
       if (!removeButton) return;
-      removeButton.closest(".wf-schedule-variation")?.remove();
+      const removedVariation = removeButton.closest(".wf-schedule-variation");
+      const removedIndex = Math.max(1, Number(removedVariation?.dataset.scheduleVariantRow) || 1);
+      editingScheduleVariantMedia.splice(removedIndex, 1);
+      removedVariation?.remove();
       [...scheduleVariations.querySelectorAll(".wf-schedule-variation")].forEach((variation, index) => {
-        variation.querySelector("label").textContent = `Variação ${index + 2}`;
+        const variantIndex = index + 1;
+        variation.dataset.scheduleVariantRow = String(variantIndex);
+        variation.querySelector(":scope > label").textContent = `Variação ${variantIndex + 1}`;
+        const fileInput = variation.querySelector("[data-schedule-variant-file]");
+        fileInput.dataset.scheduleVariantFile = String(variantIndex);
+        fileInput.setAttribute("aria-label", `Anexar arquivo à variação ${variantIndex + 1}`);
       });
       updateScheduleVariationChances();
     });
@@ -1682,6 +2080,7 @@
         text: item?.text || "",
         texts: Array.isArray(item?.texts) ? item.texts : [],
         media: item?.media || null,
+        variants: Array.isArray(item?.variants) ? item.variants : [],
         scheduledAt: Number(item?.scheduledAt) || 0,
         repeat: item?.repeat || "none",
         repeatEvery: Number(item?.repeatEvery) || 1,
@@ -1865,30 +2264,101 @@
       if (scheduleHasEnd.checked) scheduleEndAfter.focus();
     });
 
-    function updateScheduleFileName() {
-      const name = scheduleFile.files?.[0]?.name || editingScheduleMedia?.fileName || "";
-      scheduleFileName.textContent = name;
-      scheduleFileName.title = name;
-      scheduleFileName.hidden = !name;
+    function updateScheduleFileName(fileInput = scheduleFile) {
+      if (!fileInput) return;
+      const variantIndex = Math.max(0, Number(fileInput.dataset.scheduleVariantFile) || 0);
+      const row = fileInput.closest("[data-schedule-variant-row]");
+      const nameElement = row?.querySelector(".wf-schedule-file-name") || scheduleFileName;
+      const removeButton = row?.querySelector("[data-remove-schedule-file]");
+      const name = fileInput.files?.[0]?.name || editingScheduleVariantMedia[variantIndex]?.fileName || "";
+      nameElement.textContent = name;
+      nameElement.title = name;
+      nameElement.hidden = !name;
+      if (removeButton) removeButton.hidden = !name;
     }
 
-    scheduleFile.addEventListener("change", updateScheduleFileName);
-
-    function readScheduleFile(file) {
-      if (!file) return Promise.resolve(editingScheduleMedia);
-      if (file.size > 15 * 1024 * 1024) {
-        return Promise.reject(new Error("Use arquivos de até 15 MB."));
+    scheduleMessageFields.addEventListener("change", event => {
+      if (event.target.matches("[data-schedule-variant-file]")) {
+        updateScheduleFileName(event.target);
       }
+    });
+
+    scheduleMessageFields.addEventListener("click", event => {
+      const removeButton = event.target.closest("[data-remove-schedule-file]");
+      if (!removeButton) return;
+      const row = removeButton.closest("[data-schedule-variant-row]");
+      const fileInput = row?.querySelector("[data-schedule-variant-file]");
+      if (!fileInput) return;
+      const variantIndex = Math.max(0, Number(fileInput.dataset.scheduleVariantFile) || 0);
+      fileInput.value = "";
+      editingScheduleVariantMedia[variantIndex] = null;
+      updateScheduleFileName(fileInput);
+    });
+
+    async function scheduleMediaFileFromStored(media) {
+      const response = await fetch(media.dataUrl);
+      const blob = await response.blob();
+      return new File([blob], media.fileName || "audio", {
+        type: media.mimeType || blob.type || "application/octet-stream",
+        lastModified: Date.now()
+      });
+    }
+
+    async function readScheduleFile(file, fallbackMedia = null) {
+      if (!file && !fallbackMedia?.dataUrl) return null;
+      if (
+        !file &&
+        fallbackMedia?.isPtt === true &&
+        String(fallbackMedia.mimeType || "").toLowerCase() === "audio/ogg"
+      ) {
+        return fallbackMedia;
+      }
+
+      let preparedFile = file || await scheduleMediaFileFromStored(fallbackMedia);
+      if (preparedFile.size > 15 * 1024 * 1024) {
+        throw new Error("Use arquivos de até 15 MB.");
+      }
+
+      const fileType = String(preparedFile.type || fallbackMedia?.mimeType || "").toLowerCase();
+      const fileName = String(preparedFile.name || fallbackMedia?.fileName || "");
+      const isAudio = fileType.startsWith("audio/") || /\.(aac|flac|m4a|mp3|oga|ogg|opus|wav|webm)$/i.test(fileName);
+      if (isAudio) {
+        if (!window.WFAudioConverter?.inspectFile || !window.WFAudioConverter?.convertToVoiceNote) {
+          throw new Error("O conversor de áudio não foi carregado. Atualize o WhatsApp e tente novamente.");
+        }
+        const inspection = await window.WFAudioConverter.inspectFile(preparedFile);
+        if (!inspection.isOggOpus) {
+          preparedFile = await window.WFAudioConverter.convertToVoiceNote(preparedFile);
+        }
+      }
+
+      if (preparedFile.size > 15 * 1024 * 1024) {
+        throw new Error("O áudio convertido ultrapassou o limite de 15 MB.");
+      }
+
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve({
-          fileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-          dataUrl: reader.result
+          fileName: preparedFile.name,
+          mimeType: isAudio ? "audio/ogg" : (preparedFile.type || "application/octet-stream"),
+          dataUrl: reader.result,
+          isPtt: isAudio
         });
         reader.onerror = () => reject(new Error("Não foi possível ler o arquivo."));
-        reader.readAsDataURL(file);
+        reader.readAsDataURL(preparedFile);
       });
+    }
+
+    async function collectScheduleVariants() {
+      return Promise.all(scheduleVariantRows().map(async (row, index) => {
+        const text = String(row.querySelector("textarea")?.value || "").trim();
+        const fileInput = row.querySelector("[data-schedule-variant-file]");
+        const media = await readScheduleFile(
+          fileInput?.files?.[0],
+          editingScheduleVariantMedia[index] || null
+        );
+        return { text, media };
+      }));
     }
 
     function renderScheduleTemplates() {
@@ -1914,12 +2384,18 @@
       scheduleCancelEdit.hidden = true;
       setScheduleKind(template.kind === "flow" ? "flow" : "message");
       scheduleFlow.value = template.flowId || "";
-      const texts = Array.isArray(template.texts) && template.texts.length ? template.texts : [""];
-      scheduleMessage.value = texts[0] || "";
+      const legacyTexts = Array.isArray(template.texts) && template.texts.length ? template.texts : [""];
+      const variants = Array.isArray(template.variants) && template.variants.length
+        ? template.variants.slice(0, 5)
+        : legacyTexts.slice(0, 5).map((text, index) => ({
+            text,
+            media: index === 0 ? template.media || null : null
+          }));
+      scheduleMessage.value = variants[0]?.text || "";
       scheduleVariations.innerHTML = "";
-      texts.slice(1, 5).forEach(value => addVariationField(value));
+      editingScheduleVariantMedia = variants.map(variant => variant?.media || null);
+      variants.slice(1, 5).forEach(variant => addVariationField(variant?.text || "", variant?.media || null));
       updateScheduleVariationChances();
-      editingScheduleMedia = template.media || null;
       scheduleFile.value = "";
       updateScheduleFileName();
       const now = new Date();
@@ -1943,15 +2419,16 @@
     saveScheduleTemplate.addEventListener("click", async () => {
       if (!hasValidExtensionContext()) return;
       try {
-        const media = scheduleKind === "message"
-          ? await readScheduleFile(scheduleFile.files?.[0])
-          : null;
+        const variants = scheduleKind === "message" ? await collectScheduleVariants() : [];
+        const texts = variants.map(variant => variant.text);
+        const media = variants[0]?.media || null;
         scheduleTemplates.push({
           id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
           kind: scheduleKind,
           flowId: scheduleFlow.value,
-          texts: scheduleKind === "message" ? scheduleTextFields().map(field => field.value) : [],
+          texts,
           media,
+          variants,
           time: scheduleTime.value,
           repeat: scheduleRepeat.value,
           repeatEvery: Math.max(1, Number(scheduleRepeatEvery.value) || 1),
@@ -2007,17 +2484,26 @@
         return;
       }
 
-      const rawTexts = scheduleKind === "message"
-        ? scheduleTextFields().map(field => field.value.trim())
-        : [];
-      if (scheduleKind === "message" && rawTexts.length > 1 && rawTexts.some(value => !value)) {
-        scheduleFeedback.textContent = "Preencha todas as variações ou remova os campos vazios.";
+      let variants = [];
+      try {
+        variants = scheduleKind === "message" ? await collectScheduleVariants() : [];
+      } catch (error) {
+        scheduleFeedback.textContent = error?.message || "Não foi possível ler o arquivo.";
         return;
       }
-      const texts = rawTexts.filter(Boolean);
-      const text = texts[0] || "";
+      if (
+        scheduleKind === "message" &&
+        variants.length > 1 &&
+        variants.some(variant => !variant.text && !variant.media?.dataUrl)
+      ) {
+        scheduleFeedback.textContent = "Preencha o texto, anexe um arquivo ou remova a variação vazia.";
+        return;
+      }
+      variants = variants.filter(variant => variant.text || variant.media?.dataUrl);
+      const texts = variants.map(variant => variant.text);
+      const text = variants[0]?.text || "";
       const scheduledAt = new Date(`${scheduleDate.value}T${scheduleTime.value}:00`).getTime();
-      if (scheduleKind === "message" && !texts.length && !scheduleFile.files?.[0] && !editingScheduleMedia) {
+      if (scheduleKind === "message" && !variants.length) {
         scheduleFeedback.textContent = "Digite uma mensagem ou adicione um arquivo.";
         return;
       }
@@ -2043,15 +2529,7 @@
       const stored = await chrome.storage.local.get("wfScheduledMessages");
       const messages = Array.isArray(stored.wfScheduledMessages) ? stored.wfScheduledMessages : [];
       const editingId = scheduleEditId.value;
-      let media;
-      try {
-        media = scheduleKind === "message"
-          ? await readScheduleFile(scheduleFile.files?.[0])
-          : null;
-      } catch (error) {
-        scheduleFeedback.textContent = error.message;
-        return;
-      }
+      const media = scheduleKind === "message" ? variants[0]?.media || null : null;
 
       const payload = {
         id: editingId || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`),
@@ -2065,6 +2543,7 @@
         text,
         texts,
         media,
+        variants,
         scheduledAt,
         repeat: scheduleRepeat.value,
         repeatEvery: scheduleRepeat.value === "custom" ? repeatEvery : 1,
@@ -2088,6 +2567,13 @@
           chatId: "",
           chatName: bulkScheduleColumnName || "Etapa",
           bulkTargets: bulkTargets.map(target => ({ chatId: target.chatId, chatName: target.chatName || "Contato" })),
+          targetStates: bulkTargets.map(target => ({
+            chatId: target.chatId,
+            chatName: target.chatName || "Contato",
+            status: "pending",
+            error: "",
+            updatedAt: Date.now()
+          })),
           bulkColumnId: bulkScheduleColumnId,
           bulkColumnName: bulkScheduleColumnName || "Etapa",
           createdAt: Date.now(),
@@ -2139,7 +2625,10 @@
         const item = messages.find(message => message.id === editButton.dataset.scheduleEdit);
         if (!item) return;
         if (Array.isArray(item.bulkTargets)) {
-          bulkScheduleTargets = item.bulkTargets;
+          const retryTargets = Array.isArray(item.targetStates)
+            ? item.targetStates.filter(isScheduleFailure)
+            : [];
+          bulkScheduleTargets = retryTargets.length ? retryTargets : item.bulkTargets;
           bulkScheduleColumnId = item.bulkColumnId || "";
           bulkScheduleColumnName = item.bulkColumnName || "Etapa";
           panel.classList.add("wf-bulk-mode");
@@ -2162,11 +2651,18 @@
         const savedTexts = Array.isArray(item.texts) && item.texts.length
           ? item.texts
           : [item.text || ""];
-        scheduleMessage.value = savedTexts[0] || "";
+        const savedVariants = Array.isArray(item.variants) && item.variants.length
+          ? item.variants.slice(0, 5)
+          : savedTexts.slice(0, 5).map((text, index) => ({
+              text,
+              media: index === 0 ? item.media || null : null
+            }));
+        scheduleMessage.value = savedVariants[0]?.text || "";
         scheduleVariations.innerHTML = "";
-        savedTexts.slice(1, 5).forEach(value => addVariationField(value));
+        editingScheduleVariantMedia = savedVariants.map(variant => variant?.media || null);
+        savedVariants.slice(1, 5).forEach(variant => addVariationField(variant?.text || "", variant?.media || null));
         updateScheduleVariationChances();
-        editingScheduleMedia = item.media || null;
+        scheduleFile.value = "";
         updateScheduleFileName();
         scheduleDate.value = localDate.toISOString().slice(0, 10);
         scheduleTime.value = localDate.toISOString().slice(11, 16);
@@ -2200,12 +2696,43 @@
         if (itemIndex >= 0) {
           const item = messages[itemIndex];
           const recurring = Boolean(item.repeat && item.repeat !== "none");
+          const isRetry = Boolean(retryButton?.dataset.scheduleRetry);
+          if (isRetry && hasSendTimeoutFailure(item)) {
+            const reconciliation = await reconcileTimedOutSchedule(messages, itemIndex, {
+              force: true
+            });
+            if (reconciliation.completed) {
+              scheduleFeedback.textContent = "O envio já havia sido concluído pelo WhatsApp. Nenhuma mensagem foi duplicada.";
+              await renderScheduledMessages();
+              return;
+            }
+          }
+          const retryWithoutLinkPreview = Boolean(
+            isRetry && (
+              item.retryWithoutLinkPreview ||
+              item.errorCode === "WF_SEND_TIMEOUT" ||
+              item.targetStates?.some(target => target.errorCode === "WF_SEND_TIMEOUT")
+            )
+          );
           messages[itemIndex] = {
             ...item,
             status: "pending",
             scheduledAt: Date.now(),
             ...(recurring ? { recurrenceAnchorAt: Number(item.recurrenceAnchorAt || item.scheduledAt) } : {}),
+            // A prévia de links pode bloquear o motor interno do WhatsApp.
+            // Em uma repetição após timeout, envia o mesmo texto sem a prévia.
+            retryWithoutLinkPreview,
+            // Antes de repetir um timeout, procura no histórico a mensagem que
+            // pode ter sido enviada sem devolver a confirmação ao WhatsFlow.
+            retryDedupeSince: isRetry
+              ? Number(item.retryDedupeSince || item.scheduledAt || Date.now())
+              : 0,
             error: "",
+            targetStates: Array.isArray(item.targetStates)
+              ? item.targetStates.map(target => ["failed", "skipped", "unconfirmed"].includes(target.status)
+                ? { ...target, status: "pending", error: "", errorCode: "", updatedAt: Date.now() }
+                : target)
+              : item.targetStates,
             updatedAt: Date.now()
           };
           await chrome.storage.local.set({ wfScheduledMessages: messages });
@@ -2254,6 +2781,193 @@
       return nextAt;
     }
 
+    function scheduledTargetStates(item) {
+      if (Array.isArray(item.targetStates) && item.targetStates.length) {
+        return item.targetStates.map(target => ({ ...target }));
+      }
+      const targets = Array.isArray(item.bulkTargets) && item.bulkTargets.length
+        ? item.bulkTargets
+        : [{ chatId: item.chatId, chatName: item.chatName }];
+      return targets
+        .filter(target => String(target?.chatId || "").trim())
+        .map(target => ({
+          chatId: String(target.chatId),
+          chatName: String(target.chatName || item.chatName || "Contato"),
+          status: "pending",
+          error: "",
+          updatedAt: Date.now()
+        }));
+    }
+
+    function scheduleFailureStatus(error) {
+      return ["WF_ACK_UNCONFIRMED", "WF_SEND_TIMEOUT"].includes(String(error?.code || ""))
+        ? "unconfirmed"
+        : "failed";
+    }
+
+    function hasSendTimeoutFailure(item) {
+      return Boolean(
+        item?.errorCode === "WF_SEND_TIMEOUT" ||
+        item?.targetStates?.some(target => target?.errorCode === "WF_SEND_TIMEOUT")
+      );
+    }
+
+    function scheduledTextCandidates(item) {
+      const values = Array.isArray(item?.variants) && item.variants.length
+        ? item.variants.map(variant => variant?.text)
+        : (Array.isArray(item?.texts) && item.texts.length ? item.texts : [item?.text]);
+      return values
+        .map(value => String(value || ""))
+        .filter(value => value.trim());
+    }
+
+    async function reconcileTimedOutSchedule(messages, index, { force = false } = {}) {
+      const item = messages[index];
+      if (
+        !item ||
+        item.type === "flow" ||
+        item.media?.dataUrl ||
+        item.variants?.some(variant => variant?.media?.dataUrl) ||
+        !hasSendTimeoutFailure(item)
+      ) {
+        return { checked: false, completed: false };
+      }
+
+      const texts = scheduledTextCandidates(item);
+      if (!texts.length) return { checked: false, completed: false };
+
+      const now = Date.now();
+      const states = scheduledTargetStates(item);
+      let checked = false;
+      let foundAny = false;
+
+      for (const target of states) {
+        const timeoutFailure =
+          ["failed", "unconfirmed"].includes(target.status) &&
+          (target.errorCode === "WF_SEND_TIMEOUT" || item.errorCode === "WF_SEND_TIMEOUT");
+        if (!timeoutFailure) continue;
+        if (!force && Number(target.reconcileAttempts || 0) >= 18) continue;
+        if (!force && now - Number(target.lastReconcileAt || 0) < 10000) continue;
+
+        checked = true;
+        target.lastReconcileAt = now;
+        target.reconcileAttempts = Number(target.reconcileAttempts || 0) + 1;
+        try {
+          const response = await command("CHECK_RECENT_OUTGOING", {
+            chatId: target.chatId,
+            texts,
+            since: Number(item.retryDedupeSince || item.scheduledAt || item.createdAt || now),
+            timeoutMs: force ? 3000 : 1200
+          }, force ? 15000 : 12000);
+          if (response?.result?.found) {
+            foundAny = true;
+            target.status = "sent";
+            target.sentAt = now;
+            target.messageIds = response.result.messageId ? [String(response.result.messageId)] : [];
+            target.error = "";
+            target.errorCode = "";
+          }
+        } catch (error) {
+          console.debug("[WA Flow] A confirmação tardia ainda não apareceu.", error);
+        }
+        target.updatedAt = now;
+      }
+
+      if (!checked) return { checked: false, completed: false };
+
+      const remainingFailures = states.filter(target =>
+        ["failed", "unconfirmed"].includes(target.status)
+      );
+      if (!remainingFailures.length) {
+        messages.splice(index, 1);
+        await chrome.storage.local.set({ wfScheduledMessages: messages });
+        return { checked: true, completed: true, foundAny };
+      }
+
+      messages[index] = {
+        ...item,
+        status: remainingFailures.some(target => target.status === "failed") ? "failed" : "unconfirmed",
+        targetStates: states,
+        error: remainingFailures[0].error || item.error,
+        errorCode: remainingFailures[0].errorCode || item.errorCode,
+        updatedAt: now
+      };
+      await chrome.storage.local.set({ wfScheduledMessages: messages });
+      return { checked: true, completed: false, foundAny };
+    }
+
+    function nextOccurrenceFor(item) {
+      return nextFutureScheduledTime(
+        item.repeat === "custom" && ["seconds", "minutes", "hours"].includes(item.repeatUnit)
+          ? Date.now()
+          : Number(item.recurrenceAnchorAt || item.scheduledAt),
+        item.repeat,
+        item.repeatEvery,
+        item.repeatUnit
+      );
+    }
+
+    function advanceRecurringItem(item, nextAt, now) {
+      return {
+        ...item,
+        status: "pending",
+        scheduledAt: nextAt,
+        recurrenceAnchorAt: nextAt,
+        targetStates: scheduledTargetStates(item).map(target => ({
+          ...target,
+          status: "pending",
+          error: "",
+          errorCode: "",
+          messageId: "",
+          updatedAt: now
+        })),
+        error: "",
+        updatedAt: now
+      };
+    }
+
+    function preserveFailedOccurrence(messages, index, item, error, targetStates, now) {
+      const status = scheduleFailureStatus(error);
+      const errorMessage = error?.message || String(error);
+      const failedStates = (targetStates?.length ? targetStates : scheduledTargetStates(item)).map(target =>
+        ["sent", "failed", "unconfirmed"].includes(target.status)
+          ? target
+          : { ...target, status, error: errorMessage, errorCode: String(error?.code || ""), updatedAt: now }
+      );
+      const failedItem = {
+        ...item,
+        status,
+        targetStates: failedStates,
+        flowStartIndex: Number.isFinite(Number(error?.failedIndex))
+          ? Number(error.failedIndex)
+          : Number(item.flowStartIndex || 0),
+        error: errorMessage,
+        errorCode: String(error?.code || ""),
+        updatedAt: now
+      };
+      if (!(item.repeat && item.repeat !== "none")) {
+        messages[index] = failedItem;
+        return;
+      }
+      const nextAt = nextOccurrenceFor(item);
+      const canContinue = !(Number(item.endsAt) > 0 && nextAt > Number(item.endsAt));
+      if (!canContinue) {
+        messages[index] = { ...failedItem, repeat: "none" };
+        return;
+      }
+      messages.push({
+        ...failedItem,
+        id: `${item.id}-failed-${Number(item.scheduledAt) || now}`,
+        parentScheduleId: item.id,
+        repeat: "none",
+        repeatEvery: 1,
+        repeatUnit: "",
+        endsAt: 0,
+        createdAt: now
+      });
+      messages[index] = advanceRecurringItem(item, nextAt, now);
+    }
+
     async function dispatchScheduledMessages() {
       if (!hasValidExtensionContext()) {
         disposeInvalidExtensionContext();
@@ -2266,6 +2980,26 @@
           .map(item => item.status === "sending" && now - Number(item.updatedAt || 0) > 2 * 60 * 1000
             ? { ...item, status: "pending", error: "Envio retomado após interrupção." }
             : item);
+        let repairedLegacyFailures = false;
+        const legacyLength = messages.length;
+        for (let itemIndex = 0; itemIndex < legacyLength; itemIndex++) {
+          const item = messages[itemIndex];
+          if (item?.status !== "skipped") continue;
+          const error = new Error(item.error || "O horário passou e a mensagem não foi enviada.");
+          preserveFailedOccurrence(messages, itemIndex, item, error, scheduledTargetStates(item), now);
+          repairedLegacyFailures = true;
+        }
+        if (repairedLegacyFailures) {
+          await chrome.storage.local.set({ wfScheduledMessages: messages });
+        }
+        const timeoutFailureIndex = messages.findIndex(item =>
+          ["failed", "unconfirmed"].includes(item?.status) &&
+          hasSendTimeoutFailure(item) &&
+          Date.now() - Number(item.scheduledAt || item.createdAt || 0) < 24 * 60 * 60 * 1000
+        );
+        if (timeoutFailureIndex >= 0) {
+          await reconcileTimedOutSchedule(messages, timeoutFailureIndex);
+        }
         const due = messages
           .filter(item => item.status === "pending" && Number(item.scheduledAt) <= now)
           .sort((a, b) => Number(a.scheduledAt) - Number(b.scheduledAt))[0];
@@ -2278,104 +3012,197 @@
           return;
         }
         if (now - Number(due.scheduledAt) > 30 * 60 * 1000) {
-          messages[index] = {
-            ...due,
-            status: "skipped",
-            error: "Envio ignorado porque o horário passou há mais de 30 minutos.",
-            updatedAt: now
-          };
+          const error = new Error("O horário passou há mais de 30 minutos e a mensagem não foi enviada.");
+          error.code = "WF_SCHEDULE_MISSED";
+          preserveFailedOccurrence(messages, index, due, error, scheduledTargetStates(due), now);
           await chrome.storage.local.set({ wfScheduledMessages: messages });
           return;
         }
 
-        messages[index] = { ...due, status: "sending", updatedAt: now };
+        messages[index] = {
+          ...due,
+          status: "sending",
+          targetStates: scheduledTargetStates(due),
+          updatedAt: now
+        };
         await chrome.storage.local.set({ wfScheduledMessages: messages });
 
-        try {
-          const deliveryTargets = Array.isArray(due.bulkTargets) && due.bulkTargets.length
-            ? due.bulkTargets
-            : [{ chatId: due.chatId, chatName: due.chatName }];
-          if (due.type === "flow") {
-            const scheduledFlow = (Array.isArray(stored.wfFlows) ? stored.wfFlows : [])
-              .find(flow => String(flow.id) === String(due.flowId));
-            if (!scheduledFlow) throw new Error("O fluxo programado não existe mais.");
-            deliveryTargets.forEach(target => window.dispatchEvent(new CustomEvent("WF_CHAT_CONTROL", {
-              detail: { action: "start-flow", chatId: target.chatId, flowId: due.flowId }
-            })));
-          } else {
-            const textOptions = (Array.isArray(due.texts) && due.texts.length
-              ? due.texts
-              : [due.text])
-              .map(value => String(value || ""))
-              .filter(value => value.trim());
-            for (const target of deliveryTargets) {
-              const outgoingText = textOptions.length ? textOptions[Math.floor(Math.random() * textOptions.length)] : "";
-              if (due.media?.dataUrl) {
-                const mimeType = String(due.media.mimeType || "");
-                const mediaType = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("video/") ? "video" : mimeType.startsWith("audio/") ? "audio" : "document";
-                await command("SEND_FILE", { chatId: target.chatId, block: { ...due.media, type: mediaType, caption: outgoingText, isPtt: false } }, 45000);
+        const scheduledFlow = due.type === "flow"
+          ? (Array.isArray(stored.wfFlows) ? stored.wfFlows : [])
+            .find(flow => String(flow.id) === String(due.flowId))
+          : null;
+        const legacyTextOptions = (Array.isArray(due.texts) && due.texts.length
+          ? due.texts
+          : [due.text])
+          .map(value => String(value || ""));
+        const variantOptions = (
+          Array.isArray(due.variants) && due.variants.length
+            ? due.variants
+            : legacyTextOptions.map((text, index) => ({
+                text,
+                media: index === 0 ? due.media || null : null
+              }))
+        )
+          .slice(0, 5)
+          .map(variant => ({
+            text: String(variant?.text || ""),
+            media: variant?.media || null
+          }))
+          .filter(variant => variant.text.trim() || variant.media?.dataUrl);
+        const targetStates = scheduledTargetStates(due);
+        const preparedVoiceMedia = new Map();
+        let firstError = null;
+
+        const persistProgress = async () => {
+          const latest = await chrome.storage.local.get("wfScheduledMessages");
+          const updated = Array.isArray(latest.wfScheduledMessages) ? latest.wfScheduledMessages : [];
+          const latestIndex = updated.findIndex(item => item.id === due.id);
+          if (latestIndex < 0) return false;
+          updated[latestIndex] = {
+            ...updated[latestIndex],
+            status: "sending",
+            targetStates: targetStates.map(target => ({ ...target })),
+            updatedAt: Date.now()
+          };
+          await chrome.storage.local.set({ wfScheduledMessages: updated });
+          return true;
+        };
+
+        for (const target of targetStates) {
+          if (target.status === "sent") continue;
+          target.status = "sending";
+          target.error = "";
+          target.errorCode = "";
+          target.updatedAt = Date.now();
+          if (!await persistProgress()) return;
+          try {
+            const messageIds = [];
+            if (due.type === "flow") {
+              if (!scheduledFlow) throw new Error("O fluxo programado não existe mais.");
+              await startFlowAndWait({
+                chatId: target.chatId,
+                flowId: due.flowId,
+                startIndex: Number(target.flowStartIndex ?? due.flowStartIndex) || 0,
+                flowContext: {
+                  ...(due.flowContext || {}),
+                  chatName: target.chatName || due.chatName || "Contato"
+                },
+                replyText: String(due.flowReplyText || ""),
+                failureOwner: "engine",
+                failureSource: "scheduled-flow"
+              });
+            } else {
+              const selectedVariant = variantOptions.length
+                ? variantOptions[Math.floor(Math.random() * variantOptions.length)]
+                : { text: "", media: null };
+              const outgoingText = selectedVariant.text;
+              let outgoingMedia = selectedVariant.media;
+              if (outgoingMedia?.dataUrl) {
+                const mimeType = String(outgoingMedia.mimeType || "");
+                const mediaType = mimeType.startsWith("image/")
+                  ? "image"
+                  : mimeType.startsWith("video/")
+                    ? "video"
+                    : mimeType.startsWith("audio/")
+                      ? "audio"
+                      : "document";
+                if (mediaType === "audio" && outgoingMedia.isPtt !== true) {
+                  const mediaKey = outgoingMedia.dataUrl;
+                  if (!preparedVoiceMedia.has(mediaKey)) {
+                    preparedVoiceMedia.set(mediaKey, readScheduleFile(null, outgoingMedia));
+                  }
+                  outgoingMedia = await preparedVoiceMedia.get(mediaKey);
+                }
+                const mediaResult = await command("SEND_FILE", {
+                  chatId: target.chatId,
+                  block: {
+                    ...outgoingMedia,
+                    type: mediaType,
+                    caption: outgoingText,
+                    isPtt: mediaType === "audio"
+                  }
+                }, 45000);
+                await requireServerAck(mediaResult);
+                if (mediaResult?.result?.messageId) messageIds.push(String(mediaResult.result.messageId));
                 if (outgoingText && !["image", "video"].includes(mediaType)) {
-                  await command("SEND_TEXT", { chatId: target.chatId, text: outgoingText, linkPreview: true }, 45000);
+                  const textResult = await command("SEND_TEXT", {
+                    chatId: target.chatId,
+                    text: outgoingText,
+                    linkPreview: due.retryWithoutLinkPreview !== true,
+                    dedupeSince: Number(due.retryDedupeSince || 0)
+                  }, 45000);
+                  await requireServerAck(textResult);
+                  if (textResult?.result?.messageId) messageIds.push(String(textResult.result.messageId));
                 }
               } else {
-                await command("SEND_TEXT", {
+                const textResult = await command("SEND_TEXT", {
                   chatId: target.chatId,
                   text: outgoingText,
-                  linkPreview: true
+                  linkPreview: due.retryWithoutLinkPreview !== true,
+                  dedupeSince: Number(due.retryDedupeSince || 0)
                 }, 45000);
+                await requireServerAck(textResult);
+                if (textResult?.result?.messageId) messageIds.push(String(textResult.result.messageId));
               }
             }
-          }
-          const latest = await chrome.storage.local.get("wfScheduledMessages");
-          const updated = Array.isArray(latest.wfScheduledMessages) ? latest.wfScheduledMessages : [];
-          const latestIndex = updated.findIndex(item => item.id === due.id);
-          if (latestIndex < 0) return;
-          if (due.repeat && due.repeat !== "none") {
-            const nextAt = nextFutureScheduledTime(
-              due.repeat === "custom" &&
-                ["seconds", "minutes", "hours"].includes(due.repeatUnit)
-                ? Date.now()
-                : Number(due.recurrenceAnchorAt || due.scheduledAt),
-              due.repeat,
-              due.repeatEvery,
-              due.repeatUnit
-            );
-            if (Number(due.endsAt) > 0 && nextAt > Number(due.endsAt)) {
-              updated.splice(latestIndex, 1);
-            } else {
-              updated[latestIndex] = {
-                ...updated[latestIndex],
-                status: "pending",
-                scheduledAt: nextAt,
-                recurrenceAnchorAt: nextAt,
-                lastSentAt: Date.now(),
-                error: "",
-                updatedAt: Date.now()
-              };
+            target.status = "sent";
+            target.sentAt = Date.now();
+            target.messageIds = messageIds;
+            target.error = "";
+            target.errorCode = "";
+          } catch (error) {
+            firstError ||= error;
+            target.status = scheduleFailureStatus(error);
+            target.error = error?.message || String(error);
+            target.errorCode = String(error?.code || "");
+            if (error?.messageId) target.messageId = String(error.messageId);
+            if (Number.isFinite(Number(error?.failedIndex))) {
+              target.flowStartIndex = Number(error.failedIndex);
             }
-          } else {
-            updated.splice(latestIndex, 1);
           }
-          await chrome.storage.local.set({ wfScheduledMessages: updated });
-        } catch (error) {
-          const latest = await chrome.storage.local.get("wfScheduledMessages");
-          const updated = Array.isArray(latest.wfScheduledMessages) ? latest.wfScheduledMessages : [];
-          const latestIndex = updated.findIndex(item => item.id === due.id);
-        if (due.repeat && due.repeat !== "none") { const nextAt = nextFutureScheduledTime(due.repeat === "custom" && ["seconds", "minutes", "hours"].includes(due.repeatUnit) ? Date.now() : Number(due.recurrenceAnchorAt || due.scheduledAt), due.repeat, due.repeatEvery, due.repeatUnit); if (!(Number(due.endsAt) > 0 && nextAt > Number(due.endsAt))) { updated.push({ ...updated[latestIndex], id: String(due.id) + "-failed-" + Date.now(), repeat: "none", parentScheduleId: due.id, status: "failed", error: error?.message || String(error), updatedAt: Date.now() }); updated[latestIndex] = { ...updated[latestIndex], status: "pending", scheduledAt: nextAt, recurrenceAnchorAt: nextAt, error: "", updatedAt: Date.now() }; await chrome.storage.local.set({ wfScheduledMessages: updated }); return; } }
-          if (latestIndex >= 0) {
-            updated[latestIndex] = {
-              ...updated[latestIndex],
-              status: "failed",
-              error: error?.message || String(error),
-              updatedAt: Date.now()
-            };
-            await chrome.storage.local.set({ wfScheduledMessages: updated });
-          }
+          target.updatedAt = Date.now();
+          if (!await persistProgress()) return;
         }
+
+        const latest = await chrome.storage.local.get("wfScheduledMessages");
+        const updated = Array.isArray(latest.wfScheduledMessages) ? latest.wfScheduledMessages : [];
+        const latestIndex = updated.findIndex(item => item.id === due.id);
+        if (latestIndex < 0) return;
+        const finishedAt = Date.now();
+        const failedTargets = targetStates.filter(target => ["failed", "unconfirmed"].includes(target.status));
+        if (failedTargets.length) {
+          const aggregateError = firstError || new Error(failedTargets[0].error || "Mensagem não enviada.");
+          if (!aggregateError.code) aggregateError.code = failedTargets[0].errorCode || "";
+          if (!Number.isFinite(Number(aggregateError.failedIndex))) {
+            const failedIndex = Number(failedTargets[0].flowStartIndex);
+            if (Number.isFinite(failedIndex)) aggregateError.failedIndex = failedIndex;
+          }
+          preserveFailedOccurrence(
+            updated,
+            latestIndex,
+            { ...updated[latestIndex], targetStates },
+            aggregateError,
+            targetStates,
+            finishedAt
+          );
+        } else if (due.repeat && due.repeat !== "none") {
+          const nextAt = nextOccurrenceFor(due);
+          if (Number(due.endsAt) > 0 && nextAt > Number(due.endsAt)) {
+            updated.splice(latestIndex, 1);
+          } else {
+            updated[latestIndex] = {
+              ...advanceRecurringItem({ ...updated[latestIndex], targetStates }, nextAt, finishedAt),
+              lastSentAt: finishedAt
+            };
+          }
+        } else {
+          updated.splice(latestIndex, 1);
+        }
+        await chrome.storage.local.set({ wfScheduledMessages: updated });
       };
 
       if (navigator.locks?.request) {
-        await navigator.locks.request("wf-scheduled-message-dispatch", { ifAvailable: true }, lock => {
+        await navigator.locks.request("wf-scheduled-dispatch", { ifAvailable: true }, lock => {
           if (lock) return run();
         });
       } else {
@@ -2398,7 +3225,12 @@
         if (Array.isArray(item.bulkTargets)) {
           const remainingTargets = item.bulkTargets.filter(target => target.chatId !== chatId);
           if (remainingTargets.length !== item.bulkTargets.length) changed = true;
-          return remainingTargets.length ? { ...item, bulkTargets: remainingTargets, updatedAt: Date.now() } : null;
+          const remainingStates = Array.isArray(item.targetStates)
+            ? item.targetStates.filter(target => target.chatId !== chatId)
+            : item.targetStates;
+          return remainingTargets.length
+            ? { ...item, bulkTargets: remainingTargets, targetStates: remainingStates, updatedAt: Date.now() }
+            : null;
         }
         if (item.chatId === chatId) {
           changed = true;
@@ -2527,9 +3359,11 @@
   }
 
   if (document.body) {
+    installDomIncomingFallback();
     mountChatControl();
   } else {
     window.addEventListener("DOMContentLoaded", () => {
+      installDomIncomingFallback();
       mountChatControl();
     }, { once: true });
   }

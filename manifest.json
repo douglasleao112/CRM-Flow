@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "WhatsApp Flow Builder v2.3",
-  "version": "2.16.27",
+  "version": "2.16.39",
   "description": "Editor visual e engine de automações para WhatsApp Web, com suporte a fluxos grandes e mídias em Base64.",
   "permissions": [
     "storage",
+    "alarms",
     "tabs",
     "scripting",
     "declarativeNetRequestWithHostAccess",
@@ -33,6 +34,7 @@
         "https://web.whatsapp.com/*"
       ],
       "js": [
+        "audio-converter.js",
         "content.js",
         "whatsapp-kanban.js",
         "trigger-matcher.js",

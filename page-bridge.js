@@ -3,7 +3,7 @@
   window.__WF_PAGE_BRIDGE__ = true;
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const BRIDGE_VERSION = 13;
+  const BRIDGE_VERSION = 14;
   const bridgeStartedAt = Date.now();
   let voiceWppPromise = null;
   let bridgeListenersInstalled = false;
@@ -13,7 +13,11 @@
   const polledMessageIds = new Set();
   const polledMessageOrder = [];
 
-  const getWPP = () => window.__WF_WPP__ || window.WFWPP;
+  const getWPP = () => {
+    const loaderState = window.__WF_VENDOR_LOADER__?.state;
+    if (loaderState && loaderState !== "ready") return null;
+    return window.__WF_WPP__ || window.WFWPP || null;
+  };
 
   function getNativeEngine() {
     try {
@@ -64,7 +68,7 @@
     const wppReady = Boolean(
       typeof wpp?.chat?.sendTextMessage === "function" &&
       typeof wpp?.contact?.queryExists === "function" &&
-      (wpp?.isReady || wpp?.isInjected)
+      wpp?.isReady === true
     );
 
     return {
@@ -100,7 +104,7 @@
       (
         capabilities.chatApi &&
         capabilities.contactApi &&
-        (capabilities.ready || capabilities.injected)
+        capabilities.ready
       )
     );
   }
@@ -210,12 +214,12 @@
         window.AuthStore?.Stream ||
         native?.store?.WAWebStreamModel?.Stream ||
         native?.store?.Stream;
-      return String(
+      const rawState =
         stream?.state ||
         stream?.get?.("state") ||
-        stream?.socket?.state ||
-        ""
-      ).toUpperCase();
+        stream?.socket?.state;
+      if (typeof rawState !== "string" && typeof rawState !== "number") return "";
+      return String(rawState).trim().toUpperCase();
     } catch {
       return "";
     }
@@ -271,7 +275,7 @@
       whatsappOnline = false;
     }
 
-    if (!authenticated && native) {
+    if (native) {
       const streamState = getNativeStreamState(native);
       const disconnectedStates = new Set([
         "CONFLICT",
@@ -286,15 +290,18 @@
         "UNPAIRED",
         "UNPAIRED_IDLE"
       ]);
-      if (streamState) {
+      const nativeStateKnown = streamState === "CONNECTED" || disconnectedStates.has(streamState);
+      if (nativeStateKnown) {
+        // O Stream interno do próprio WhatsApp é a fonte mais atual após a
+        // máquina voltar do standby. WA-JS pode manter isOnline=false em cache.
         authenticated = !disconnectedStates.has(streamState);
         whatsappOnline = !disconnectedStates.has(streamState);
-      } else if (wppAuthenticationKnown) {
+      } else if (!authenticated && wppAuthenticationKnown) {
         // Se o próprio namespace do WhatsFlow informou logout, a simples
         // presença do Store nativo não deve transformar isso em "conectado".
         authenticated = false;
         whatsappOnline = false;
-      } else {
+      } else if (!wppAuthenticationKnown) {
         // Builds exclusivamente nativos não expõem Stream/conn, mas continuam
         // operacionais; o envio ainda fará a validação definitiva.
         authenticated = true;
@@ -304,7 +311,7 @@
 
     return {
       authenticated,
-      connected: authenticated && navigator.onLine !== false && whatsappOnline,
+      connected: authenticated && globalThis.navigator?.onLine !== false && whatsappOnline,
       accountId: getAccountId()
     };
   }
@@ -617,6 +624,18 @@
     return timestamp;
   }
 
+  function messageBody(message) {
+    return String(
+      message?.body ??
+      message?.caption ??
+      message?.text ??
+      message?.attributes?.body ??
+      message?.attributes?.caption ??
+      message?.attributes?.text ??
+      ""
+    );
+  }
+
   function messageFromMe(message) {
     const raw =
       message?.fromMe ??
@@ -729,17 +748,21 @@
           return (
             messageId &&
             !ignoredIds.has(messageId) &&
-            (!trackingToken ||
-              messageTrackingToken(message) === trackingToken) &&
-            Boolean(message?.fromMe || message?.id?.fromMe) &&
-            String(message?.body ?? "") === String(text) &&
+            messageFromMe(message) === true &&
+            messageBody(message) === String(text) &&
             sameChatId(messageChatId(message), chatId) &&
             (!timestamp || timestamp >= startedAt - 2000)
           );
         })
-        .sort((left, right) =>
-          messageTimestampMs(right) - messageTimestampMs(left)
-        )[0];
+        .sort((left, right) => {
+          // Algumas versões do WhatsApp removem comment/campaignId do modelo
+          // depois do envio. O token continua sendo preferido, mas o texto,
+          // destinatário, horário e IDs novos ainda confirmam o mesmo envio.
+          const leftTracked = trackingToken && messageTrackingToken(left) === trackingToken ? 1 : 0;
+          const rightTracked = trackingToken && messageTrackingToken(right) === trackingToken ? 1 : 0;
+          return rightTracked - leftTracked ||
+            messageTimestampMs(right) - messageTimestampMs(left);
+        })[0];
       if (match && serializeMessageKey(match?.id || match)) return match;
       await sleep(125);
     } while (Date.now() < deadline);
@@ -795,23 +818,108 @@
           return (
             messageId &&
             !ignoredIds.has(messageId) &&
-            messageTrackingToken(message) === trackingToken &&
-            Boolean(message?.fromMe || message?.id?.fromMe) &&
-            String(message?.body ?? "") === String(text) &&
+            messageFromMe(message) === true &&
+            messageBody(message) === String(text) &&
             (!candidateChatId || sameChatId(candidateChatId, chatId)) &&
             (!timestamp || timestamp >= startedAt - 2000)
           );
         })
-        .sort((left, right) =>
-          messageTimestampMs(right) - messageTimestampMs(left)
-        )[0];
+        .sort((left, right) => {
+          const leftTracked = trackingToken && messageTrackingToken(left) === trackingToken ? 1 : 0;
+          const rightTracked = trackingToken && messageTrackingToken(right) === trackingToken ? 1 : 0;
+          return rightTracked - leftTracked ||
+            messageTimestampMs(right) - messageTimestampMs(left);
+        })[0];
       if (match) return match;
       await sleep(125);
     } while (Date.now() < deadline);
     return null;
   }
 
-  async function sendText(requestId, chatId, text, linkPreview = true) {
+  async function checkRecentOutgoing(requestId, chatId, texts, since, timeoutMs = 1500) {
+    try {
+      const candidates = [...new Set(
+        (Array.isArray(texts) ? texts : [texts])
+          .map(value => String(value || ""))
+          .filter(value => value.trim())
+      )];
+      if (!candidates.length) {
+        emit("COMMAND_RESULT", { requestId, ok: true, result: { found: false } });
+        return;
+      }
+
+      const startedAt = Number(since) > 0 ? Number(since) : Date.now() - 10 * 60 * 1000;
+      const deadline = Date.now() + Math.max(1, Math.min(5000, Number(timeoutMs) || 1500));
+      const native = getNativeEngine();
+      let result = null;
+      let resultChatId = chatId;
+
+      if (native) {
+        const chat = await getNativeChat(native, chatId);
+        do {
+          result = getNativeMessages(native, chat, chatId)
+            .filter(message => {
+              const timestamp = messageTimestampMs(message);
+              return (
+                serializeMessageKey(message?.id || message) &&
+                messageFromMe(message) === true &&
+                candidates.includes(messageBody(message)) &&
+                sameChatId(messageChatId(message), chatId) &&
+                (!timestamp || timestamp >= startedAt - 2000)
+              );
+            })
+            .sort((left, right) => messageTimestampMs(right) - messageTimestampMs(left))[0] || null;
+          if (result) break;
+          await sleep(125);
+        } while (Date.now() < deadline);
+        resultChatId = messageChatId(result) || chatId;
+      } else if (isOperationalEngine()) {
+        do {
+          let messages = [];
+          try {
+            messages = await getTrackedMessages(chatId, 80);
+          } catch {}
+          result = (messages || [])
+            .filter(message => {
+              const timestamp = messageTimestampMs(message);
+              const candidateChatId = messageChatId(message);
+              return (
+                serializeMessageKey(message?.id || message) &&
+                messageFromMe(message) === true &&
+                candidates.includes(messageBody(message)) &&
+                (!candidateChatId || sameChatId(candidateChatId, chatId)) &&
+                (!timestamp || timestamp >= startedAt - 2000)
+              );
+            })
+            .sort((left, right) => messageTimestampMs(right) - messageTimestampMs(left))[0] || null;
+          if (result) break;
+          await sleep(125);
+        } while (Date.now() < deadline);
+        resultChatId = messageChatId(result) || chatId;
+      }
+
+      const messageId = serializeMessageKey(result?.waMessageKey || result?.id || result);
+      emit("COMMAND_RESULT", {
+        requestId,
+        ok: true,
+        result: {
+          found: Boolean(result && messageId),
+          messageId,
+          chatId: resultChatId,
+          text: result ? messageBody(result) : ""
+        }
+      });
+    } catch (error) {
+      emit("COMMAND_RESULT", {
+        requestId,
+        ok: false,
+        error: error?.message || String(error),
+        errorCode: String(error?.code || "")
+      });
+    }
+  }
+
+  async function sendText(requestId, chatId, text, linkPreview = true, dedupeSince = 0) {
     try {
       if (!getConnectionState().connected) {
         const error = new Error("O WhatsApp Web está desconectado. Reconecte-o antes de enviar.");
@@ -827,7 +935,23 @@
       if (transport === "btwebjs" || transport === "wwebjs") {
         const native = getNativeEngine();
         const chat = await getNativeChat(native, chatId);
-        await prepareNativeChat(native, chat);
+        const retryDedupeSince = Number(dedupeSince) > 0 ? Number(dedupeSince) : 0;
+        if (retryDedupeSince) {
+          result = await findRecentNativeOutgoing(
+            native,
+            chat,
+            chatId,
+            text,
+            retryDedupeSince,
+            new Set(),
+            "",
+            1
+          );
+        }
+        if (result) {
+          resultChatId = messageChatId(result) || chatId;
+        } else {
+          await prepareNativeChat(native, chat);
         const existingIds = new Set(
           getNativeMessages(native, chat, chatId)
             .map(message => serializeMessageKey(message?.id || message))
@@ -875,53 +999,67 @@
           );
         }
         resultChatId = messageChatId(result) || chatId;
-      } else if (transport === "wppconnect") {
-        let existingMessages = [];
-        try {
-          existingMessages = await withTimeout(
-            Promise.resolve(getTrackedMessages(chatId, 50)),
-            2000,
-            "O WhatsApp demorou para ler o histórico da conversa."
-          );
-        } catch {}
-        const existingIds = new Set(
-          (existingMessages || [])
-            .map(message => serializeMessageKey(message?.id || message))
-            .filter(Boolean)
-        );
-        try {
-          result = await withTimeout(
-            Promise.resolve(getWPP().chat.sendTextMessage(chatId, text, {
-              markIsRead: true,
-              linkPreview: linkPreview !== false,
-              waitForAck: false,
-              comment: sendToken,
-              campaignId: sendToken
-            })),
-            20000,
-            "O motor de envio não respondeu a tempo."
-          );
-        } catch (error) {
-          if (error?.code !== "WF_SEND_TIMEOUT") throw error;
-          result = await findRecentWppOutgoing(
-            chatId,
-            text,
-            startedAt,
-            existingIds,
-            sendToken,
-            8000
-          );
-          if (!result) throw error;
         }
-        if (!serializeMessageKey(result?.waMessageKey || result?.id || result)) {
+      } else if (transport === "wppconnect") {
+        const retryDedupeSince = Number(dedupeSince) > 0 ? Number(dedupeSince) : 0;
+        if (retryDedupeSince) {
           result = await findRecentWppOutgoing(
             chatId,
             text,
-            startedAt,
-            existingIds,
-            sendToken,
-            8000
+            retryDedupeSince,
+            new Set(),
+            "",
+            1
           );
+        }
+        let existingMessages = [];
+        if (!result) {
+          try {
+            existingMessages = await withTimeout(
+              Promise.resolve(getTrackedMessages(chatId, 50)),
+              2000,
+              "O WhatsApp demorou para ler o histórico da conversa."
+            );
+          } catch {}
+          const existingIds = new Set(
+            (existingMessages || [])
+              .map(message => serializeMessageKey(message?.id || message))
+              .filter(Boolean)
+          );
+          try {
+            result = await withTimeout(
+              Promise.resolve(getWPP().chat.sendTextMessage(chatId, text, {
+                markIsRead: true,
+                linkPreview: linkPreview !== false,
+                waitForAck: false,
+                comment: sendToken,
+                campaignId: sendToken
+              })),
+              20000,
+              "O motor de envio não respondeu a tempo."
+            );
+          } catch (error) {
+            if (error?.code !== "WF_SEND_TIMEOUT") throw error;
+            result = await findRecentWppOutgoing(
+              chatId,
+              text,
+              startedAt,
+              existingIds,
+              sendToken,
+              8000
+            );
+            if (!result) throw error;
+          }
+          if (!serializeMessageKey(result?.waMessageKey || result?.id || result)) {
+            result = await findRecentWppOutgoing(
+              chatId,
+              text,
+              startedAt,
+              existingIds,
+              sendToken,
+              8000
+            );
+          }
         }
         resultChatId =
           serializeWid(result?.chatId) ||
@@ -1331,13 +1469,20 @@
         "O WhatsApp não confirmou o início do envio do áudio."
       );
       if (!result) throw new Error("O WhatsApp não confirmou o envio da mídia.");
+      const messageId = serializeMessageKey(result?.waMessageKey || result?.id || result);
+      if (!messageId) {
+        throw new Error("O WhatsApp não registrou a mídia no histórico local.");
+      }
+      const serverAck = await readServerAck(messageId, result?.ack);
 
       emit("COMMAND_RESULT", {
         requestId,
         ok: true,
         result: {
           sent: true,
-          messageId: String(result?.id?._serialized || result?.id?.id || result?.id || ""),
+          messageId,
+          ack: serverAck,
+          ackPending: serverAck === null,
           chatId: serializeWid(result?.chatId) || serializeWid(result?.to) || chatId
         }
       });
@@ -1975,7 +2120,27 @@
     }
   }
 
-  async function listKanbanChats(requestId) {
+  function readBulkChatProperty(model, names) {
+    for (const name of names) {
+      try {
+        const value = model?.[name] ?? model?.attributes?.[name] ?? model?.get?.(name);
+        if (value !== undefined && value !== null && typeof value !== 'function') return value;
+      } catch {}
+    }
+    return undefined;
+  }
+  function readBulkFavorite(chat) {
+    const raw = readBulkChatProperty(chat, ['isFavorite', 'isFavourite', 'favorite', 'favourite']);
+    if (typeof raw === 'boolean') return raw;
+    try {
+      if (typeof chat?.matchFilter === 'function') {
+        const matched = chat.matchFilter('favorites');
+        if (typeof matched === 'boolean') return matched;
+      }
+    } catch {}
+    return null;
+  }
+  async function listKanbanChats(requestId, { includeGroups = false, forBulk = false } = {}) {
     try {
       const native = getNativeEngine();
       const store = native?.store?.Chat;
@@ -2018,7 +2183,8 @@
       }
       const result = (await Promise.all(chats.map(async chat => {
         const chatId = serializeWid(chat?.id || chat?.wid || chat?.contact?.id);
-        if (!chatId || chatId.endsWith("@g.us") || chatId.includes("newsletter") || chatId === "status@broadcast") return null;
+        if (!chatId || (!includeGroups && chatId.endsWith('@g.us')) || chatId.includes('newsletter') || chatId.endsWith('@broadcast')) return null;
+        const isGroup = chatId.endsWith('@g.us');
         const contact = chat?.contact || {};
         let phoneWid = serializeWid(
           contact?.phoneNumber ||
@@ -2032,7 +2198,7 @@
             phoneWid = serializeWid(entry?.phoneNumber || entry?.wid || entry?.pn);
           } catch {}
         }
-        const messages = native ? getNativeMessages(native, chat, chatId) : getCollectionModels(chat?.msgs);
+        const messages = forBulk ? [] : native ? getNativeMessages(native, chat, chatId) : getCollectionModels(chat?.msgs);
         const recentMessages = messages
           .filter(message => hasUserMessageContent(message))
           .sort((left, right) => messageTimestampMs(right) - messageTimestampMs(left))
@@ -2069,7 +2235,7 @@
           chat?.profilePicThumbObj?.img ||
           ""
         );
-        if (!avatar && typeof wpp?.contact?.getProfilePictureUrl === "function") {
+        if (!forBulk && !avatar && typeof wpp?.contact?.getProfilePictureUrl === "function") {
           try {
             const picture = await wpp.contact.getProfilePictureUrl(chatId);
             avatar = String(picture?.eurl || picture?.img || picture?.url || picture || "");
@@ -2081,6 +2247,12 @@
           labels,
           name: String(chat?.name || chat?.formattedTitle || contact?.name || contact?.pushname || chatId.split("@")[0]).trim(),
           phone: String(phoneWid || "").split("@")[0].replace(/\D/g, ""),
+          isGroup,
+          isArchived: Boolean(readBulkChatProperty(chat, ['archive', 'isArchived', 'archived'])),
+          isPinned: Boolean(readBulkChatProperty(chat, ['pin', 'isPinned', 'pinned'])),
+          isUnread: Number(readBulkChatProperty(chat, ['unreadCount', 'unread']) || 0) !== 0 ||
+            Boolean(readBulkChatProperty(chat, ['markedUnread', 'isUnread', 'hasUnread'])),
+          isFavorite: readBulkFavorite(chat),
           unreadCount: Number(chat?.unreadCount || chat?.unread || 0),
           timestamp: Number(lastMessage?.timestamp || messageTimestampMs(chat?.lastReceivedKey) || chat?.t || 0),
           lastMessage: String(lastMessage?.body || ""),
@@ -2088,7 +2260,7 @@
           messages: recentMessages
         };
       }))).filter(Boolean).sort((left, right) => Number(right.timestamp || 0) - Number(left.timestamp || 0));
-      emit("COMMAND_RESULT", { requestId, ok: true, result: { chats: result.slice(0, 1000) } });
+      emit("COMMAND_RESULT", { requestId, ok: true, result: { chats: forBulk ? result : result.slice(0, 1000) } });
     } catch (error) {
       emit("COMMAND_RESULT", { requestId, ok: false, error: error?.message || String(error) });
     }
@@ -2148,32 +2320,425 @@
     }
   }
 
+  function isFalseBusinessDetectionError(error) {
+    const code = String(error?.code || error?.errorCode || "").toLocaleLowerCase("en-US");
+    const message = String(error?.message || error || "");
+    return code === "is_not_business" || /not a business version/i.test(message);
+  }
+
+  async function mutateKanbanLabelChats(wpp, resolvedId, chatIds, type) {
+    let businessDetectionError = null;
+    if (typeof wpp?.labels?.addOrRemoveLabels === "function") {
+      try {
+        const result = await wpp.labels.addOrRemoveLabels(
+          chatIds,
+          [{ labelId: resolvedId, type }]
+        );
+        if (result !== false) return result;
+      } catch (error) {
+        if (!isFalseBusinessDetectionError(error)) throw error;
+        businessDetectionError = error;
+      }
+    }
+    const fallbackMethod = type === "add" ? "addChats" : "removeChats";
+    if (typeof wpp?.lists?.[fallbackMethod] === "function") {
+      return wpp.lists[fallbackMethod](resolvedId, chatIds);
+    }
+    if (businessDetectionError) throw businessDetectionError;
+    throw new Error(`O WhatsApp não disponibilizou a função de ${type === "add" ? "aplicar" : "remover"} etiquetas.`);
+  }
+
+  async function renameKanbanLabelNative(wpp, resolvedId, nextName) {
+    let businessDetectionError = null;
+    if (typeof wpp?.labels?.editLabel === "function") {
+      try {
+        return await wpp.labels.editLabel(resolvedId, { name: nextName });
+      } catch (error) {
+        if (!isFalseBusinessDetectionError(error)) throw error;
+        businessDetectionError = error;
+      }
+    }
+    if (typeof wpp?.lists?.rename === "function") {
+      await wpp.lists.rename(resolvedId, nextName);
+      return null;
+    }
+    if (businessDetectionError) throw businessDetectionError;
+    throw new Error("O WhatsApp não disponibilizou a função de editar etiquetas.");
+  }
+
+  async function deleteKanbanLabelNative(wpp, resolvedId) {
+    let businessDetectionError = null;
+    if (typeof wpp?.labels?.deleteLabel === "function") {
+      try {
+        return await wpp.labels.deleteLabel(resolvedId);
+      } catch (error) {
+        if (!isFalseBusinessDetectionError(error)) throw error;
+        businessDetectionError = error;
+      }
+    }
+    if (typeof wpp?.lists?.remove === "function") {
+      await wpp.lists.remove(resolvedId);
+      return null;
+    }
+    if (businessDetectionError) throw businessDetectionError;
+    throw new Error("O WhatsApp não disponibilizou a função de excluir etiquetas.");
+  }
+
   async function applyChatLabel(requestId, chatId, requestedLabelId, requestedLabelName) {
     try {
+      const deadline = Date.now() + 12000;
       if (!chatId) throw new Error("Conversa inválida para aplicar a etiqueta.");
       const wpp = getWPP();
       const allLabels = typeof wpp?.labels?.getAllLabels === "function"
-        ? await wpp.labels.getAllLabels()
+        ? await withKanbanLabelDeadline(
+          () => wpp.labels.getAllLabels(),
+          deadline,
+          4000,
+          "O WhatsApp demorou para carregar as etiquetas."
+        )
         : [];
-      const wantedId = String(requestedLabelId || "");
+      const wantedId = String(requestedLabelId || "").trim();
       const wantedName = String(requestedLabelName || "").trim().toLocaleLowerCase("pt-BR");
-      const label = (Array.isArray(allLabels) ? allLabels : []).find(item =>
-        labelId(item?.id) === wantedId ||
-        (wantedName && String(item?.name || "").trim().toLocaleLowerCase("pt-BR") === wantedName)
-      );
+      const labelCatalog = Array.isArray(allLabels) ? allLabels : [];
+      let label = wantedId
+        ? labelCatalog.find(item => labelId(item?.id) === wantedId)
+        : null;
+      if (!wantedId && wantedName) {
+        const nameMatches = labelCatalog.filter(item =>
+          String(item?.name || "").trim().toLocaleLowerCase("pt-BR") === wantedName
+        );
+        if (nameMatches.length > 1) {
+          throw new Error("Há mais de uma etiqueta com esse nome. Sincronize e selecione novamente pelo editor.");
+        }
+        label = nameMatches[0] || null;
+      }
       const resolvedId = labelId(label?.id) || wantedId;
       if (!resolvedId) throw new Error("Etiqueta do WhatsApp não encontrada.");
-      if (typeof wpp?.labels?.addOrRemoveLabels !== "function") {
-        throw new Error("O WhatsApp não disponibilizou a função de aplicar etiquetas.");
-      }
-      await wpp.labels.addOrRemoveLabels(
-        [chatId],
-        [{ labelId: resolvedId, type: "add" }]
+      const result = await withKanbanLabelDeadline(
+        () => mutateKanbanLabelChats(wpp, resolvedId, [chatId], "add"),
+        deadline,
+        4000,
+        "O WhatsApp demorou para aplicar a etiqueta."
       );
+      if (result === false) throw new Error("O WhatsApp recusou a aplicação da etiqueta.");
+      const verification = await waitForKanbanLabelPresence(wpp, [chatId], resolvedId, deadline);
+      if (!verification.confirmedChatIds.includes(String(chatId))) {
+        throw new Error("O WhatsApp não confirmou a aplicação da etiqueta.");
+      }
       emit("COMMAND_RESULT", {
         requestId,
         ok: true,
         result: { labelId: resolvedId, labelName: String(label?.name || requestedLabelName || "Etiqueta") }
+      });
+    } catch (error) {
+      emit("COMMAND_RESULT", { requestId, ok: false, error: error?.message || String(error) });
+    }
+  }
+
+  async function removeChatLabel(requestId, chatId, requestedLabelId, requestedLabelName) {
+    try {
+      const deadline = Date.now() + 12000;
+      if (!chatId) throw new Error("Conversa inválida para remover a etiqueta.");
+      const wpp = getWPP();
+      const allLabels = typeof wpp?.labels?.getAllLabels === "function"
+        ? await withKanbanLabelDeadline(
+          () => wpp.labels.getAllLabels(),
+          deadline,
+          4000,
+          "O WhatsApp demorou para carregar as etiquetas."
+        )
+        : [];
+      const wantedId = String(requestedLabelId || "").trim();
+      const wantedName = String(requestedLabelName || "").trim().toLocaleLowerCase("pt-BR");
+      const labelCatalog = Array.isArray(allLabels) ? allLabels : [];
+      let label = wantedId
+        ? labelCatalog.find(item => labelId(item?.id) === wantedId)
+        : null;
+      if (!wantedId && wantedName) {
+        const nameMatches = labelCatalog.filter(item =>
+          String(item?.name || "").trim().toLocaleLowerCase("pt-BR") === wantedName
+        );
+        if (nameMatches.length > 1) {
+          throw new Error("Há mais de uma etiqueta com esse nome. Sincronize e selecione novamente pelo editor.");
+        }
+        label = nameMatches[0] || null;
+      }
+      const resolvedId = labelId(label?.id) || wantedId;
+      if (!resolvedId) throw new Error("Etiqueta do WhatsApp não encontrada.");
+
+      let hasLabel = null;
+      for (let attempt = 0; attempt < 3 && hasLabel === null && Date.now() < deadline; attempt++) {
+        const currentStates = await readKanbanChatLabelStates(wpp, [chatId], resolvedId, deadline);
+        hasLabel = currentStates.get(String(chatId));
+        if (hasLabel === null && attempt < 2 && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, Math.min(200, Math.max(0, deadline - Date.now()))));
+        }
+      }
+      if (hasLabel === null || hasLabel === undefined) {
+        throw new Error("Não foi possível confirmar as etiquetas desta conversa. Tente novamente após abrir o contato no WhatsApp.");
+      }
+      if (hasLabel === false) {
+        emit("COMMAND_RESULT", {
+          requestId,
+          ok: true,
+          result: {
+            labelId: resolvedId,
+            labelName: String(label?.name || requestedLabelName || "Etiqueta"),
+            removed: false,
+            alreadyAbsent: true
+          }
+        });
+        return;
+      }
+
+      const result = await withKanbanLabelDeadline(
+        () => mutateKanbanLabelChats(wpp, resolvedId, [chatId], "remove"),
+        deadline,
+        4000,
+        "O WhatsApp demorou para remover a etiqueta."
+      );
+      if (result === false) throw new Error("O WhatsApp recusou a remoção da etiqueta.");
+      const verification = await waitForKanbanLabelRemoval(wpp, [chatId], resolvedId, deadline, 20);
+      if (!verification.removedChatIds.includes(String(chatId))) {
+        throw new Error("O WhatsApp não confirmou a remoção da etiqueta.");
+      }
+      emit("COMMAND_RESULT", {
+        requestId,
+        ok: true,
+        result: {
+          labelId: resolvedId,
+          labelName: String(label?.name || requestedLabelName || "Etiqueta"),
+          removed: true,
+          alreadyAbsent: false
+        }
+      });
+    } catch (error) {
+      emit("COMMAND_RESULT", { requestId, ok: false, error: error?.message || String(error) });
+    }
+  }
+
+  function withKanbanLabelDeadline(factory, deadline, maxMs, message) {
+    const remainingMs = Math.min(maxMs, deadline - Date.now());
+    if (remainingMs <= 0) {
+      const error = new Error(message);
+      error.code = "WF_KANBAN_LABEL_DEADLINE";
+      throw error;
+    }
+    return withTimeout(Promise.resolve().then(factory), remainingMs, message);
+  }
+
+  async function resolveMutableKanbanLabel(requestedLabelId, deadline = Date.now() + 10000) {
+    const wpp = getWPP();
+    const wantedId = String(requestedLabelId || "").trim();
+    if (!wantedId) throw new Error("Etiqueta sem identificação. Sincronize o Kanban e tente novamente.");
+    const allLabels = typeof wpp?.labels?.getAllLabels === "function"
+      ? await withKanbanLabelDeadline(
+        () => wpp.labels.getAllLabels(),
+        deadline,
+        10000,
+        "O WhatsApp demorou para carregar as etiquetas."
+      )
+      : [];
+    const label = (Array.isArray(allLabels) ? allLabels : []).find(item => labelId(item?.id) === wantedId);
+    if (!label) throw new Error("A etiqueta não foi encontrada no WhatsApp. Sincronize o Kanban e tente novamente.");
+    return { wpp, label, resolvedId: wantedId, allLabels };
+  }
+
+  async function readKanbanChatLabelStates(wpp, chatIds, resolvedLabelId, deadline) {
+    let contacts = [];
+    if (typeof wpp?.contact?.list === "function") {
+      try {
+        contacts = await withKanbanLabelDeadline(
+          () => wpp.contact.list(),
+          deadline,
+          5000,
+          "O WhatsApp demorou para consultar os contatos."
+        );
+      } catch {}
+    }
+    const contactList = Array.isArray(contacts) ? contacts : [];
+    const states = new Map();
+    chatIds.forEach(chatId => {
+      const target = String(chatId);
+      const contact = contactList.find(item => [
+        serializeWid(item?.id),
+        serializeWid(item?.wid),
+        serializeWid(item?.phoneNumber),
+        serializeWid(item?.accountLid)
+      ].filter(Boolean).includes(target));
+      const nativeChat = getNativeEngine()?.store?.Chat?.get?.(target);
+      const sources = [contact, nativeChat, nativeChat?.contact].filter(Boolean);
+      const loadedLabelSources = sources.filter(source => Array.isArray(source?.labels));
+      if (!loadedLabelSources.length) {
+        states.set(target, null);
+        return;
+      }
+      const ids = new Set(loadedLabelSources.flatMap(source => contactLabelIds(source)));
+      states.set(target, ids.has(resolvedLabelId));
+    });
+    return states;
+  }
+
+  async function waitForKanbanLabelRemoval(wpp, chatIds, resolvedLabelId, deadline, maxAttempts = 4) {
+    const pending = new Set(chatIds.map(String));
+    const removed = new Set();
+    const attempts = Math.max(1, Number(maxAttempts) || 4);
+    for (let attempt = 0; attempt < attempts && pending.size && Date.now() < deadline; attempt++) {
+      const states = await readKanbanChatLabelStates(wpp, [...pending], resolvedLabelId, deadline);
+      states.forEach((hasLabel, chatId) => {
+        if (hasLabel === false) {
+          removed.add(chatId);
+          pending.delete(chatId);
+        }
+      });
+      if (pending.size && attempt < attempts - 1 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, deadline - Date.now()))));
+      }
+    }
+    return { removedChatIds: [...removed], unresolvedChatIds: [...pending] };
+  }
+
+  async function waitForKanbanLabelPresence(wpp, chatIds, resolvedLabelId, deadline) {
+    const pending = new Set(chatIds.map(String));
+    const confirmed = new Set();
+    for (let attempt = 0; attempt < 20 && pending.size && Date.now() < deadline; attempt++) {
+      const states = await readKanbanChatLabelStates(wpp, [...pending], resolvedLabelId, deadline);
+      states.forEach((hasLabel, currentChatId) => {
+        if (hasLabel === true) {
+          confirmed.add(currentChatId);
+          pending.delete(currentChatId);
+        }
+      });
+      if (pending.size && attempt < 19 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, deadline - Date.now()))));
+      }
+    }
+    return { confirmedChatIds: [...confirmed], unresolvedChatIds: [...pending] };
+  }
+
+  async function removeKanbanLabelFromChats(requestId, chatIds, requestedLabelId) {
+    try {
+      const deadline = Date.now() + 105000;
+      const uniqueChatIds = [...new Set((Array.isArray(chatIds) ? chatIds : [])
+        .filter(chatId => typeof chatId === "string")
+        .map(chatId => chatId.trim())
+        .filter(chatId => chatId && chatId.includes("@")))];
+      if (!uniqueChatIds.length) throw new Error("Nenhum contato válido foi encontrado para limpar a etiqueta.");
+      const { wpp, resolvedId } = await resolveMutableKanbanLabel(requestedLabelId, deadline);
+      const removedChatIds = new Set();
+      let fallbackChatIds = [...uniqueChatIds];
+      let lastMutationError = null;
+      try {
+        const bulkResult = await withKanbanLabelDeadline(
+          () => mutateKanbanLabelChats(wpp, resolvedId, uniqueChatIds, "remove"),
+          deadline,
+          30000,
+          "O WhatsApp demorou para remover a etiqueta. Sincronize antes de tentar novamente."
+        );
+        if (bulkResult === false) throw new Error("O WhatsApp recusou a remoção em lote.");
+        const verification = await waitForKanbanLabelRemoval(wpp, uniqueChatIds, resolvedId, deadline);
+        verification.removedChatIds.forEach(chatId => removedChatIds.add(chatId));
+        fallbackChatIds = verification.unresolvedChatIds;
+      } catch (bulkError) {
+        if (["WF_SEND_TIMEOUT", "WF_KANBAN_LABEL_DEADLINE"].includes(bulkError?.code)) throw bulkError;
+        lastMutationError = bulkError;
+        fallbackChatIds = [...uniqueChatIds];
+      }
+      const batchSize = 20;
+      for (let offset = 0; offset < fallbackChatIds.length && Date.now() < deadline; offset += batchSize) {
+        const batch = fallbackChatIds.slice(offset, offset + batchSize);
+        await Promise.all(batch.map(async chatId => {
+          try {
+            await withKanbanLabelDeadline(
+              () => mutateKanbanLabelChats(wpp, resolvedId, [chatId], "remove"),
+              deadline,
+              15000,
+              "Tempo esgotado ao remover a etiqueta deste contato."
+            );
+          } catch (error) {
+            lastMutationError = error;
+          }
+        }));
+        const verification = await waitForKanbanLabelRemoval(wpp, batch, resolvedId, deadline);
+        verification.removedChatIds.forEach(chatId => removedChatIds.add(chatId));
+      }
+      const removed = [...removedChatIds];
+      const failedChatIds = uniqueChatIds.filter(chatId => !removedChatIds.has(chatId));
+      if (!removed.length) {
+        throw lastMutationError || new Error("O WhatsApp não confirmou a remoção da etiqueta em nenhum contato.");
+      }
+      emit("COMMAND_RESULT", {
+        requestId,
+        ok: true,
+        result: { labelId: resolvedId, removedChatIds: removed, failedChatIds }
+      });
+    } catch (error) {
+      emit("COMMAND_RESULT", { requestId, ok: false, error: error?.message || String(error) });
+    }
+  }
+
+  async function editKanbanLabel(requestId, requestedLabelId, requestedName) {
+    try {
+      const deadline = Date.now() + 50000;
+      const nextName = String(requestedName || "").trim();
+      if (!nextName) throw new Error("Digite um nome válido para a etiqueta.");
+      const { wpp, resolvedId, allLabels } = await resolveMutableKanbanLabel(requestedLabelId, deadline);
+      const comparableName = value => String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim()
+        .toLocaleLowerCase("pt-BR");
+      const duplicate = allLabels.some(item =>
+        labelId(item?.id) !== resolvedId && comparableName(item?.name) === comparableName(nextName)
+      );
+      if (duplicate) throw new Error("Já existe uma etiqueta com esse nome no WhatsApp.");
+      const result = await withKanbanLabelDeadline(
+        () => renameKanbanLabelNative(wpp, resolvedId, nextName),
+        deadline,
+        30000,
+        "O WhatsApp demorou para editar a etiqueta."
+      );
+      let confirmedName = comparableName(result?.name) === comparableName(nextName);
+      if (!confirmedName) {
+        const refreshed = typeof wpp.labels.getAllLabels === "function"
+          ? await withKanbanLabelDeadline(() => wpp.labels.getAllLabels(), deadline, 10000, "O WhatsApp demorou para confirmar a etiqueta.")
+          : [];
+        const updated = (Array.isArray(refreshed) ? refreshed : []).find(item => labelId(item?.id) === resolvedId);
+        confirmedName = comparableName(updated?.name) === comparableName(nextName);
+      }
+      if (!confirmedName) throw new Error("O WhatsApp não confirmou a alteração da etiqueta.");
+      emit("COMMAND_RESULT", {
+        requestId,
+        ok: true,
+        result: { labelId: resolvedId, labelName: nextName }
+      });
+    } catch (error) {
+      emit("COMMAND_RESULT", { requestId, ok: false, error: error?.message || String(error) });
+    }
+  }
+
+  async function deleteKanbanLabel(requestId, requestedLabelId) {
+    try {
+      const deadline = Date.now() + 50000;
+      const { wpp, resolvedId } = await resolveMutableKanbanLabel(requestedLabelId, deadline);
+      const result = await withKanbanLabelDeadline(
+        () => deleteKanbanLabelNative(wpp, resolvedId),
+        deadline,
+        30000,
+        "O WhatsApp demorou para excluir a etiqueta."
+      );
+      const deleteConfirmed = result === true || result?.deleteLabelResult === true;
+      if (!deleteConfirmed) {
+        const refreshed = typeof wpp.labels.getAllLabels === "function"
+          ? await withKanbanLabelDeadline(() => wpp.labels.getAllLabels(), deadline, 10000, "O WhatsApp demorou para confirmar a exclusão.")
+          : [];
+        const stillExists = (Array.isArray(refreshed) ? refreshed : []).some(item => labelId(item?.id) === resolvedId);
+        if (stillExists) throw new Error("O WhatsApp não confirmou a exclusão da etiqueta.");
+      }
+      emit("COMMAND_RESULT", {
+        requestId,
+        ok: true,
+        result: { labelId: resolvedId }
       });
     } catch (error) {
       emit("COMMAND_RESULT", { requestId, ok: false, error: error?.message || String(error) });
@@ -2365,7 +2930,7 @@
     if (!data || data.source !== "WF_CONTENT") return;
 
     if (data.type === "SEND_TEXT") {
-      sendText(data.requestId, data.chatId, data.text, data.linkPreview);
+      sendText(data.requestId, data.chatId, data.text, data.linkPreview, data.dedupeSince);
     }
 
     if (data.type === "RESOLVE_CHAT") {
@@ -2374,6 +2939,16 @@
 
     if (data.type === "CHECK_MESSAGE_ACKS") {
       checkMessageAcks(data.requestId, data.messageIds || []);
+    }
+
+    if (data.type === "CHECK_RECENT_OUTGOING") {
+      checkRecentOutgoing(
+        data.requestId,
+        data.chatId,
+        data.texts || [],
+        data.since,
+        data.timeoutMs
+      );
     }
 
     if (data.type === "CHECK_CAMPAIGN_ACTIVITY") {
@@ -2397,7 +2972,7 @@
     }
 
     if (data.type === "LIST_KANBAN_CHATS") {
-      listKanbanChats(data.requestId);
+      listKanbanChats(data.requestId, { includeGroups: Boolean(data.includeGroups), forBulk: Boolean(data.forBulk) });
     }
 
     if (data.type === "GET_KANBAN_CHAT_LABELS") {
@@ -2410,6 +2985,22 @@
 
     if (data.type === "APPLY_CHAT_LABEL") {
       applyChatLabel(data.requestId, data.chatId, data.labelId, data.labelName);
+    }
+
+    if (data.type === "REMOVE_CHAT_LABEL") {
+      removeChatLabel(data.requestId, data.chatId, data.labelId, data.labelName);
+    }
+
+    if (data.type === "REMOVE_KANBAN_LABEL_FROM_CHATS") {
+      removeKanbanLabelFromChats(data.requestId, data.chatIds, data.labelId);
+    }
+
+    if (data.type === "EDIT_KANBAN_LABEL") {
+      editKanbanLabel(data.requestId, data.labelId, data.newName);
+    }
+
+    if (data.type === "DELETE_KANBAN_LABEL") {
+      deleteKanbanLabel(data.requestId, data.labelId);
     }
 
     if (data.type === "MARK_KANBAN_CHAT_READ") {

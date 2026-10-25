@@ -14,6 +14,7 @@ let replacingFlowId = null;
 let blockLibraryOpener = null;
 let analytics = {};
 let whatsappLabels = [];
+let savedFlowFingerprints = new Map();
 
 const $ = selector => document.querySelector(selector);
 
@@ -78,6 +79,20 @@ function renderMetrics() {
 
 function currentFlow() {
   return flows.find(flow => flow.id === selectedId);
+}
+
+function flowSaveFingerprint(flow) {
+  return JSON.stringify(flow, (key, value) => key === "collapsed" ? undefined : value);
+}
+
+function captureSavedFlowFingerprints() {
+  savedFlowFingerprints = new Map(
+    flows.map(flow => [String(flow.id), flowSaveFingerprint(flow)])
+  );
+}
+
+function flowHasUnsavedChanges(flow) {
+  return savedFlowFingerprints.get(String(flow.id)) !== flowSaveFingerprint(flow);
 }
 
 function normalizeFlowGroups(rawGroups, sourceFlows = flows) {
@@ -226,9 +241,9 @@ function newBlock(type) {
     const text = "Olá! Como vai?";
     return { ...base, text, messages: [text], showTyping: true, typingSeconds: 3, showLinkPreview: false };
   }
-  if (type === "image") return { ...base, fileName: "", mimeType: "", dataUrl: "", caption: "", viewOnce: false };
-  if (type === "video") return { ...base, fileName: "", mimeType: "", dataUrl: "", caption: "", viewOnce: false };
-  if (type === "audio") return { ...base, fileName: "", mimeType: "audio/ogg", dataUrl: "", isPtt: true, waveform: true, showRecording: false, recordingSeconds: 3 };
+  if (type === "image") return { ...base, fileName: "", mimeType: "", dataUrl: "", mediaVariants: [], caption: "", viewOnce: false };
+  if (type === "video") return { ...base, fileName: "", mimeType: "", dataUrl: "", mediaVariants: [], caption: "", viewOnce: false };
+  if (type === "audio") return { ...base, fileName: "", mimeType: "audio/ogg", dataUrl: "", audioVariants: [], isPtt: true, waveform: true, showRecording: false, recordingSeconds: 3 };
   if (type === "wait") {
     return { ...base, seconds: 3, varyInterval: false, minSeconds: 3, maxSeconds: 10 };
   }
@@ -405,6 +420,9 @@ function renderFlowList() {
         <span class="flow-list-name">${esc(flow.name || "Fluxo sem nome")}</span>
       </button>
       <div class="flow-combined-actions" role="group" aria-label="Ações do fluxo">
+        ${flowHasUnsavedChanges(flow) ? `
+          <button type="button" class="flow-save" data-save-flow="${flow.id}" title="Salvar alterações" aria-label="Salvar alterações do fluxo">✓</button>
+        ` : ""}
         <button type="button" class="flow-copy" data-copy="${flow.id}" title="Copiar fluxo" aria-label="Copiar fluxo">${iconSvg("duplicate")}</button>
         <button type="button" class="flow-delete" data-delete="${flow.id}" title="Excluir fluxo" aria-label="Excluir fluxo">×</button>
       </div>
@@ -533,13 +551,164 @@ function renderTriggerRows() {
   `).join("");
 }
 
-function fileField(block, accept, helper) {
+function fileField(block, accept, helper, showStatus = true) {
   return `
     <div class="node-field">
       <label>Arquivo</label>
       <input type="file" data-media-file accept="${accept}">
-      <div class="workflow-file-status">
-        ${block.fileName ? `Selecionado: <strong>${esc(block.fileName)}</strong>` : helper}
+      ${showStatus ? `
+        <div class="workflow-file-status">
+          ${block.fileName ? `Selecionado: <strong>${esc(block.fileName)}</strong>` : helper}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function audioVariantsForBlock(block = {}) {
+  const stored = Array.isArray(block.audioVariants)
+    ? block.audioVariants
+        .slice(0, 5)
+        .map(item => ({
+          fileName: String(item?.fileName || ""),
+          mimeType: String(item?.mimeType || "audio/ogg"),
+          dataUrl: String(item?.dataUrl || "")
+        }))
+        .filter(item => item.dataUrl)
+    : [];
+
+  if (stored.length) return stored;
+  if (!block.dataUrl) return [];
+
+  return [{
+    fileName: String(block.fileName || ""),
+    mimeType: String(block.mimeType || "audio/ogg"),
+    dataUrl: String(block.dataUrl)
+  }];
+}
+
+function syncPrimaryAudioFields(block) {
+  const variants = audioVariantsForBlock(block);
+  block.audioVariants = variants;
+  const primary = variants[0] || { fileName: "", mimeType: "audio/ogg", dataUrl: "" };
+  block.fileName = primary.fileName;
+  block.mimeType = primary.mimeType;
+  block.dataUrl = primary.dataUrl;
+}
+
+function visualMediaVariantsForBlock(block = {}) {
+  const fallbackMimeType = block.type === "image" ? "image/jpeg" : "video/mp4";
+  const stored = Array.isArray(block.mediaVariants)
+    ? block.mediaVariants
+        .slice(0, 5)
+        .map(item => ({
+          fileName: String(item?.fileName || ""),
+          mimeType: String(item?.mimeType || fallbackMimeType),
+          dataUrl: String(item?.dataUrl || "")
+        }))
+        .filter(item => item.dataUrl)
+    : [];
+
+  if (stored.length) return stored;
+  if (!block.dataUrl) return [];
+
+  return [{
+    fileName: String(block.fileName || ""),
+    mimeType: String(block.mimeType || fallbackMimeType),
+    dataUrl: String(block.dataUrl)
+  }];
+}
+
+function syncPrimaryVisualMediaFields(block) {
+  const variants = visualMediaVariantsForBlock(block);
+  block.mediaVariants = variants;
+  const primary = variants[0] || { fileName: "", mimeType: "", dataUrl: "" };
+  block.fileName = primary.fileName;
+  block.mimeType = primary.mimeType;
+  block.dataUrl = primary.dataUrl;
+}
+
+function visualMediaBlockFields(block) {
+  const isImage = block.type === "image";
+  const variants = visualMediaVariantsForBlock(block);
+  const noun = isImage ? "imagem" : "vídeo";
+  const accept = isImage
+    ? "image/jpeg,image/png,image/webp,image/gif"
+    : "video/mp4,video/webm,video/quicktime";
+
+  const preview = (media, mediaIndex) => isImage
+    ? `<img src="${media.dataUrl}" alt="Prévia da ${noun} ${mediaIndex + 1}">`
+    : `<video controls muted preload="metadata" src="${media.dataUrl}"></video>`;
+
+  return `
+    <div class="node-grid visual-media-node-grid">
+      <div class="visual-media-variant-list">
+        ${variants.length ? variants.map((media, mediaIndex) => `
+          <div class="audio-file-preview-container media-file-preview-container" data-media-variant-container="${mediaIndex}">
+            <div class="node-field">
+              <label>Arquivo</label>
+              <div class="audio-file-picker">
+                <label class="audio-file-picker-button">
+                  Escolher arquivo
+                  <input type="file" data-media-variant-file="${mediaIndex}" accept="${accept}">
+                </label>
+                <span class="workflow-file-status audio-selected-file-name"
+                  title="${esc(media.fileName || `${noun} selecionado`)}">${esc(media.fileName || `${noun} selecionado`)}</span>
+              </div>
+            </div>
+
+            <div class="audio-preview visual-media-preview">
+              <div class="audio-preview-header">
+                <div><strong>Prévia da ${noun}${variants.length > 1 ? ` ${mediaIndex + 1}` : ""}</strong></div>
+                <div class="audio-variation-card-actions">
+                  ${variants.length > 1 ? `
+                    <button type="button" class="audio-variation-remove" data-remove-media-variant="${mediaIndex}"
+                      title="Remover esta ${noun}" aria-label="Remover ${noun} ${mediaIndex + 1}">×</button>
+                  ` : ""}
+                </div>
+              </div>
+              <div class="visual-media-preview-body">${preview(media, mediaIndex)}</div>
+            </div>
+          </div>
+        `).join("") : `
+          <div class="audio-file-preview-container media-file-preview-container">
+            <div class="node-field">
+              <label>Arquivo</label>
+              <div class="audio-file-picker">
+                <label class="audio-file-picker-button">
+                  Escolher arquivo
+                  <input type="file" data-media-file accept="${accept}">
+                </label>
+                <span class="workflow-file-status audio-selected-file-name">Nenhum arquivo escolhido</span>
+              </div>
+            </div>
+            <div class="audio-preview-placeholder">A prévia da ${noun} aparecerá aqui</div>
+          </div>
+        `}
+      </div>
+
+      ${variants.length ? `
+        <div class="audio-variation-actions visual-media-variation-actions">
+          <label class="audio-variation-add ${variants.length >= 5 ? "disabled" : ""}">
+            <span aria-hidden="true">+</span>
+            ${variants.length >= 5 ? `Limite de 5 ${isImage ? "imagens" : "vídeos"}` : `Adicionar outr${isImage ? "a imagem" : "o vídeo"}`}
+            <input type="file" data-add-media-file accept="${accept}" ${variants.length >= 5 ? "disabled" : ""}>
+          </label>
+          ${variants.length > 1 ? `
+            <span class="audio-variation-chance">
+              Cada ${noun} tem ${Math.round(100 / variants.length)}% de chance
+            </span>
+          ` : ""}
+        </div>
+      ` : ""}
+
+      <label class="form-check visual-media-view-once">
+        <input class="form-check-input" type="checkbox" data-field="viewOnce" ${block.viewOnce ? "checked" : ""}>
+        <span class="form-check-label">Visualização única</span>
+      </label>
+      <div class="node-field full visual-media-caption">
+        <label>Legenda</label>
+        <textarea data-field="caption">${esc(block.caption || "")}</textarea>
       </div>
     </div>
   `;
@@ -579,13 +748,22 @@ async function validateWhatsAppMediaFile(file, block) {
   }
 
   if (block.type === "audio" && block.isPtt !== false) {
-    const hasOpus = signature.includes("OpusHead");
-    if (!hasOpus) {
+    const inspection = window.WFAudioConverter?.inspectFile
+      ? await window.WFAudioConverter.inspectFile(file)
+      : {
+          isOggOpus: signature.startsWith("OggS") && signature.includes("OpusHead")
+        };
+    if (!inspection.isOggOpus) {
+      if (!window.WFAudioConverter?.convertToVoiceNote) {
+        return {
+          ok: false,
+          message: "O conversor automático de áudio não foi carregado. Atualize a página e tente novamente."
+        };
+      }
       return {
-        ok: false,
-        message:
-          "Para enviar como gravado na hora, o áudio precisa ser OGG com codec Opus. " +
-          "Renomear ou apenas trocar o contêiner de um MP3 não é suficiente."
+        ok: true,
+        needsConversion: true,
+        mimeType: "audio/ogg"
       };
     }
 
@@ -677,125 +855,121 @@ function blockFields(block, index) {
   }
 
   if (block.type === "image") {
-    return `
-      <div class="node-grid">
-        ${fileField(block, "image/jpeg,image/png,image/webp,image/gif", "Escolha uma imagem")}
-
-        ${
-          block.dataUrl ? `
-          <div class="image-thumb-card">
-            <img src="${block.dataUrl}" class="image-thumb-preview" alt="">
-          </div>` : ""
-        }
-
-        <label class="form-check">
-          <input class="form-check-input" type="checkbox" data-field="viewOnce" ${block.viewOnce ? "checked" : ""}>
-          <span class="form-check-label">Visualização única</span>
-        </label>
-        <div class="node-field full">
-          <label>Legenda</label>
-          <textarea data-field="caption">${esc(block.caption || "")}</textarea>
-        </div>
-      </div>
-    `;
+    return visualMediaBlockFields(block);
   }
 
   if (block.type === "video") {
-    return `
-      <div class="node-grid">
-        ${fileField(block, "video/mp4,video/webm,video/quicktime", "Escolha um vídeo")}
-        <div class="video-preview-column">
-          ${
-            block.dataUrl
-              ? `
-                <div class="video-thumb-card" title="Prévia de ${esc(block.fileName || "vídeo")}">
-                  <video controls muted preload="metadata" src="${block.dataUrl}"></video>
-                </div>
-              `
-              : '<div class="video-thumb-placeholder">Prévia</div>'
-          }
-          <label class="form-check video-view-once">
-            <input class="form-check-input" type="checkbox" data-field="viewOnce" ${block.viewOnce ? "checked" : ""}>
-            <span class="form-check-label">Visualização única</span>
-          </label>
-        </div>
-        <div class="node-field full">
-          <label>Legenda</label>
-          <textarea data-field="caption">${esc(block.caption || "")}</textarea>
-        </div>
-      </div>
-    `;
+    return visualMediaBlockFields(block);
   }
 
   if (block.type === "audio") {
     const recordingSeconds = normalizeRecordingSeconds(block.recordingSeconds);
+    const audioVariants = audioVariantsForBlock(block);
+    const audioAccept = ".ogg,.oga,.opus,.mp3,.wav,.m4a,.aac,.flac,.webm,audio/ogg,audio/opus,audio/mpeg,audio/mp3,audio/wav,audio/mp4,audio/aac,audio/flac,audio/webm";
 
     return `
-      <div class="node-grid">
-        ${fileField(block, ".ogg,.oga,.opus,.mp3,.wav,.webm,audio/ogg,audio/opus,audio/mpeg,audio/mp3,audio/wav,audio/webm", "Prefira OGG/Opus")}
-
+      <div class="node-grid audio-node-grid">
         <div class="node-checks">
-          <label class="form-check">
-            <input class="form-check-input" type="checkbox" data-field="isPtt" ${block.isPtt !== false ? "checked" : ""}>
-            <span class="form-check-label">Enviar como gravado na hora (mensagem de voz)</span>
-          </label>
+          <div class="form-check audio-recording-option">
+            <input
+              id="audio-recording-toggle-${index}"
+              class="form-check-input"
+              type="checkbox"
+              data-field="showRecording"
+              ${block.showRecording ? "checked" : ""}
+            >
+            <label class="form-check-label" for="audio-recording-toggle-${index}">Mostrar "Gravando..." por</label>
+            <input
+              id="audio-recording-seconds-${index}"
+              class="audio-recording-seconds"
+              type="number"
+              inputmode="numeric"
+              min="1"
+              max="300"
+              step="1"
+              value="${recordingSeconds}"
+              data-field="recordingSeconds"
+              aria-label="Tempo exibindo Gravando em segundos"
+              ${block.showRecording ? "" : "disabled"}
+            >
+            <label class="audio-recording-suffix" for="audio-recording-seconds-${index}">segundos antes de enviar</label>
+          </div>
 
           <label class="form-check">
             <input class="form-check-input" type="checkbox" data-field="waveform" ${block.waveform !== false ? "checked" : ""}>
-            <span class="form-check-label">Mostrar forma de onda (desmarcado: linha reta)</span>
+            <span class="form-check-label">Enviar áudio em formato de onda</span>
+          </label>
+
+          <label class="form-check">
+            <input class="form-check-input" type="checkbox" data-field="isPtt" ${block.isPtt !== false ? "checked" : ""}>
+            <span class="form-check-label">Mostrar como Gravado na hora</span>
           </label>
         </div>
 
-        <div class="form-check audio-recording-option full">
-          <input
-            id="audio-recording-toggle-${index}"
-            class="form-check-input"
-            type="checkbox"
-            data-field="showRecording"
-            ${block.showRecording ? "checked" : ""}
-          >
-          <label class="form-check-label" for="audio-recording-toggle-${index}">Mostrar “Gravando...” por</label>
-          <input
-            id="audio-recording-seconds-${index}"
-            class="audio-recording-seconds"
-            type="number"
-            inputmode="numeric"
-            min="1"
-            max="300"
-            step="1"
-            value="${recordingSeconds}"
-            data-field="recordingSeconds"
-            aria-label="Tempo exibindo Gravando em segundos"
-            ${block.showRecording ? "" : "disabled"}
-          >
-          <label class="audio-recording-suffix" for="audio-recording-seconds-${index}">segundos antes de enviar</label>
-        </div>
+        <div class="audio-file-preview-list">
+          ${audioVariants.length ? audioVariants.map((audio, audioIndex) => `
+            <div class="audio-file-preview-container" data-audio-variant-container="${audioIndex}">
+              <div class="node-field">
+                <label>Arquivo</label>
+                <div class="audio-file-picker">
+                  <label class="audio-file-picker-button">
+                    Escolher arquivo
+                    <input type="file" data-audio-variant-file="${audioIndex}" accept="${audioAccept}">
+                  </label>
+                  <span class="workflow-file-status audio-selected-file-name"
+                    title="${esc(audio.fileName || "Áudio selecionado")}">${esc(audio.fileName || "Áudio selecionado")}</span>
+                </div>
+              </div>
 
-        ${
-          block.dataUrl
-            ? `
-              <div class="audio-preview full">
+              <div class="audio-preview" data-audio-variant-preview="${audioIndex}">
                 <div class="audio-preview-header">
                   <div>
-                    <strong>Prévia do áudio</strong>
-                    <span>${esc(block.fileName || "Áudio selecionado")}</span>
+                    <strong>Prévia do áudio${audioVariants.length > 1 ? ` ${audioIndex + 1}` : ""}</strong>
+                  </div>
+                  <div class="audio-variation-card-actions">
+                    ${audioVariants.length > 1 ? `
+                      <button type="button" class="audio-variation-remove" data-remove-audio-variant="${audioIndex}"
+                        title="Remover este áudio" aria-label="Remover áudio ${audioIndex + 1}">×</button>
+                    ` : ""}
                   </div>
                 </div>
 
-                <audio
-                  controls
-                  preload="metadata"
-                  src="${block.dataUrl}"
-                ></audio>
-
-                <div class="audio-file-diagnostics">
-                  <span><strong>Formato:</strong> ${esc(block.mimeType || "não identificado")}</span>
-                  <span><strong>Modo:</strong> ${block.isPtt !== false ? "Gravado na hora (PTT)" : "Arquivo de áudio"}</span>
+                <audio controls preload="metadata" src="${audio.dataUrl}"></audio>
+              </div>
+            </div>
+          `).join("") : `
+            <div class="audio-file-preview-container">
+              <div class="node-field">
+                <label>Arquivo</label>
+                <div class="audio-file-picker">
+                  <label class="audio-file-picker-button">
+                    Escolher arquivo
+                    <input type="file" data-media-file accept="${audioAccept}">
+                  </label>
+                  <span class="workflow-file-status audio-selected-file-name">Nenhum arquivo escolhido</span>
                 </div>
               </div>
-            `
-            : ""
-        }
+              <div class="audio-preview-placeholder">
+                A prévia do áudio aparecerá aqui
+              </div>
+            </div>
+          `}
+        </div>
+
+        ${audioVariants.length ? `
+          <div class="audio-variation-actions audio-variation-actions-left">
+            <label class="audio-variation-add ${audioVariants.length >= 5 ? "disabled" : ""}">
+              <span aria-hidden="true">+</span>
+              ${audioVariants.length >= 5 ? "Limite de 5 áudios" : "Adicionar outro áudio"}
+              <input type="file" data-add-audio-file accept="${audioAccept}" ${audioVariants.length >= 5 ? "disabled" : ""}>
+            </label>
+            ${audioVariants.length > 1 ? `
+              <span class="audio-variation-chance">
+                Cada áudio tem ${Math.round(100 / audioVariants.length)}% de chance
+              </span>
+            ` : ""}
+          </div>
+        ` : ""}
       </div>
     `;
   }
@@ -1039,6 +1213,7 @@ function renderBlocks() {
         <span>Solte o bloco aqui</span>
       </div>
     `;
+    renderFlowList();
     return;
   }
 
@@ -1099,6 +1274,7 @@ function renderBlocks() {
       ` : ""}
     </div>
   `).join("");
+  renderFlowList();
 }
 
 function syncHeader() {
@@ -1269,10 +1445,25 @@ function normalizeImportedBlock(block = {}) {
     normalized.mimeType = String(normalized.mimeType || "");
 
     if (normalized.type === "audio") {
+      normalized.audioVariants = audioVariantsForBlock(normalized);
+      const primaryAudio = normalized.audioVariants[0];
+      if (primaryAudio) {
+        normalized.dataUrl = primaryAudio.dataUrl;
+        normalized.fileName = primaryAudio.fileName;
+        normalized.mimeType = primaryAudio.mimeType;
+      }
       normalized.isPtt = normalized.isPtt !== false;
       normalized.waveform = normalized.waveform !== false;
       normalized.showRecording = Boolean(normalized.showRecording);
       normalized.recordingSeconds = normalizeRecordingSeconds(normalized.recordingSeconds);
+    } else if (["image", "video"].includes(normalized.type)) {
+      normalized.mediaVariants = visualMediaVariantsForBlock(normalized);
+      const primaryMedia = normalized.mediaVariants[0];
+      if (primaryMedia) {
+        normalized.dataUrl = primaryMedia.dataUrl;
+        normalized.fileName = primaryMedia.fileName;
+        normalized.mimeType = primaryMedia.mimeType;
+      }
     }
   }
 
@@ -1345,6 +1536,8 @@ async function persistFlowOrganization() {
     wfSchemaVersion: 3,
     wfSavedAt: Date.now()
   });
+  captureSavedFlowFingerprints();
+  renderFlowList();
 }
 
 async function saveAll() {
@@ -1366,6 +1559,8 @@ async function saveAll() {
       wfSchemaVersion: 3,
       wfSavedAt: Date.now()
     });
+
+    captureSavedFlowFingerprints();
 
     button.textContent = "Salvo ✓";
     setTimeout(() => {
@@ -1407,6 +1602,7 @@ async function load() {
     analytics = data.wfAnalytics || {};
     whatsappLabels = Array.isArray(data.wfWhatsappLabels) ? data.wfWhatsappLabels : [];
     selectedId = flows[0]?.id || null;
+    captureSavedFlowFingerprints();
     render();
   } catch (error) {
     console.error("[WA Flow] Erro ao carregar:", error);
@@ -1425,6 +1621,7 @@ $("#flowList").addEventListener("click", async event => {
   const groupDelete = event.target.closest("[data-group-delete]");
   const groupAddFlow = event.target.closest("[data-group-add-flow]");
   const select = event.target.closest("[data-select]");
+  const save = event.target.closest("[data-save-flow]");
   const copy = event.target.closest("[data-copy]");
   const remove = event.target.closest("[data-delete]");
 
@@ -1493,6 +1690,11 @@ $("#flowList").addEventListener("click", async event => {
     closeLibrary();
     selectedId = select.dataset.select;
     render();
+    return;
+  }
+
+  if (save) {
+    await saveAll();
     return;
   }
 
@@ -1678,7 +1880,7 @@ $("#blocks").addEventListener("input", async event => {
     return;
   }
 
-  if (event.target.matches("[data-media-file]") && event.target.files[0]) {
+  if (event.target.matches("[data-media-file], [data-add-audio-file], [data-audio-variant-file], [data-add-media-file], [data-media-variant-file]") && event.target.files[0]) {
     const file = event.target.files[0];
     if (file.size > 15 * 1024 * 1024) {
       alert("Use arquivos de até 15 MB.");
@@ -1694,25 +1896,94 @@ $("#blocks").addEventListener("input", async event => {
         return;
       }
 
+      let preparedFile = file;
+      const fileStatus =
+        event.target.closest(".audio-file-preview-container, .media-file-preview-container")?.querySelector(".workflow-file-status") ||
+        article.querySelector(".workflow-file-status");
+      if (validation.needsConversion) {
+        const originalStatus = fileStatus?.innerHTML || "";
+        if (fileStatus) fileStatus.textContent = "Convertendo para OGG/Opus... 0%";
+        try {
+          preparedFile = await window.WFAudioConverter.convertToVoiceNote(file, progress => {
+            if (fileStatus) fileStatus.textContent = `Convertendo para OGG/Opus... ${progress}%`;
+          });
+        } catch (conversionError) {
+          console.error("[WA Flow] Falha ao converter áudio:", conversionError);
+          if (fileStatus) fileStatus.innerHTML = originalStatus;
+          alert(conversionError?.message || "Não foi possível converter este áudio para OGG/Opus.");
+          event.target.value = "";
+          return;
+        }
+      }
+
       const reader = new FileReader();
       reader.onload = () => {
-        block.fileName = file.name;
-        const lowerName = file.name.toLowerCase();
-        block.mimeType =
+        const lowerName = preparedFile.name.toLowerCase();
+        const mimeType =
           validation.mimeType ||
           (lowerName.endsWith(".ogg") || lowerName.endsWith(".oga")
             ? "audio/ogg"
             : lowerName.endsWith(".opus")
               ? "audio/opus"
               : file.type || "application/octet-stream");
-        block.dataUrl = reader.result;
+        const mediaValue = {
+          fileName: preparedFile.name,
+          mimeType,
+          dataUrl: String(reader.result || "")
+        };
+
+        if (block.type === "audio") {
+          const variants = audioVariantsForBlock(block);
+          if (event.target.matches("[data-add-audio-file]")) {
+            if (variants.length >= 5) {
+              alert("Este bloco já tem o limite de 5 áudios.");
+              return;
+            }
+            variants.push(mediaValue);
+          } else if (event.target.matches("[data-audio-variant-file]")) {
+            const variantIndex = Number(event.target.dataset.audioVariantFile);
+            if (variantIndex >= 0 && variantIndex < variants.length) {
+              variants[variantIndex] = mediaValue;
+            }
+          } else if (variants.length) {
+            variants[0] = mediaValue;
+          } else {
+            variants.push(mediaValue);
+          }
+          block.audioVariants = variants.slice(0, 5);
+          syncPrimaryAudioFields(block);
+        } else if (["image", "video"].includes(block.type)) {
+          const variants = visualMediaVariantsForBlock(block);
+          if (event.target.matches("[data-add-media-file]")) {
+            if (variants.length >= 5) {
+              alert(`Este bloco já tem o limite de 5 ${block.type === "image" ? "imagens" : "vídeos"}.`);
+              return;
+            }
+            variants.push(mediaValue);
+          } else if (event.target.matches("[data-media-variant-file]")) {
+            const variantIndex = Number(event.target.dataset.mediaVariantFile);
+            if (variantIndex >= 0 && variantIndex < variants.length) {
+              variants[variantIndex] = mediaValue;
+            }
+          } else if (variants.length) {
+            variants[0] = mediaValue;
+          } else {
+            variants.push(mediaValue);
+          }
+          block.mediaVariants = variants.slice(0, 5);
+          syncPrimaryVisualMediaFields(block);
+        } else {
+          block.fileName = mediaValue.fileName;
+          block.mimeType = mediaValue.mimeType;
+          block.dataUrl = mediaValue.dataUrl;
+        }
         renderBlocks();
       };
       reader.onerror = () => {
         alert("Não foi possível ler o arquivo selecionado.");
         event.target.value = "";
       };
-      reader.readAsDataURL(file);
+      reader.readAsDataURL(preparedFile);
     } catch (error) {
       console.error("[WA Flow] Falha ao validar mídia:", error);
       alert("Não foi possível verificar a compatibilidade do arquivo.");
@@ -1784,6 +2055,32 @@ $("#blocks").addEventListener("click", event => {
     clone.id = uid();
     flow.blocks.splice(index + 1, 0, clone);
     renderBlocks();
+    return;
+  }
+
+  const removeAudioVariant = event.target.closest("[data-remove-audio-variant]");
+  if (removeAudioVariant) {
+    const block = flow.blocks[index];
+    const variants = audioVariantsForBlock(block);
+    if (variants.length > 1) {
+      variants.splice(Number(removeAudioVariant.dataset.removeAudioVariant), 1);
+      block.audioVariants = variants;
+      syncPrimaryAudioFields(block);
+      renderBlocks();
+    }
+    return;
+  }
+
+  const removeMediaVariant = event.target.closest("[data-remove-media-variant]");
+  if (removeMediaVariant) {
+    const block = flow.blocks[index];
+    const variants = visualMediaVariantsForBlock(block);
+    if (variants.length > 1) {
+      variants.splice(Number(removeMediaVariant.dataset.removeMediaVariant), 1);
+      block.mediaVariants = variants;
+      syncPrimaryVisualMediaFields(block);
+      renderBlocks();
+    }
     return;
   }
 
@@ -2198,6 +2495,21 @@ $("#newFlowGroup").addEventListener("click", async () => {
   }
 });
 $("#saveBtn").addEventListener("click", saveAll);
+
+let flowSaveIndicatorUpdateScheduled = false;
+function scheduleFlowSaveIndicatorUpdate() {
+  if (flowSaveIndicatorUpdateScheduled) return;
+  flowSaveIndicatorUpdateScheduled = true;
+  queueMicrotask(() => {
+    flowSaveIndicatorUpdateScheduled = false;
+    renderFlowList();
+  });
+}
+
+["input", "change", "click", "drop"].forEach(eventName => {
+  document.addEventListener(eventName, scheduleFlowSaveIndicatorUpdate);
+});
+
 $("#openLibrary").addEventListener("click", event => openLibrary("add", null, event.currentTarget));
 $("#addEndBlock").addEventListener("click", event => openLibrary("add", null, event.currentTarget));
 $("#closeLibrary").addEventListener("click", closeLibrary);
@@ -2261,6 +2573,9 @@ $("#importFile").addEventListener("change", async event => {
       wfSchemaVersion: 3,
       wfSavedAt: Date.now()
     });
+
+    captureSavedFlowFingerprints();
+    renderFlowList();
 
     $("#importBtn").textContent = "Importado ✓";
 

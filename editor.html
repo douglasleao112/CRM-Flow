@@ -347,24 +347,24 @@
       <div id="bulkAdvancedFilters" class="bulk-tag-rules-panel full hidden">
         <div class="bulk-tag-rules-heading">
           <div>
-            <h2>Regras de etiquetas</h2>
+            <h2>Regras de conversas e etiquetas</h2>
             <p>Defina quem recebe e quem fica de fora do disparo.</p>
           </div>
           <button id="bulkAddTagRule" class="bulk-add-tag-rule" type="button">+ Regra</button>
         </div>
         <div class="bulk-tag-rules-counts" aria-live="polite">
           <span>Incluir <span id="bulkTagSelectionBadge" class="bulk-count-badge">0 selecionadas</span></span>
-          <span>Excluir <span id="bulkExcludeSelectionBadge" class="bulk-count-badge bulk-count-badge-danger">0 etiquetas</span></span>
+          <span>Excluir <span id="bulkExcludeSelectionBadge" class="bulk-count-badge bulk-count-badge-danger">0 regras</span></span>
         </div>
-        <div id="bulkTagRules" class="bulk-tag-rules" role="group" aria-label="Regras de etiquetas"></div>
+        <div id="bulkTagRules" class="bulk-tag-rules" role="group" aria-label="Regras de conversas e etiquetas"></div>
         <div id="bulkIncludeModeWrap" class="bulk-include-mode hidden">
           <div class="bulk-include-mode-label">Quando houver mais de uma regra para incluir:</div>
-          <div class="bulk-match-options" role="group" aria-label="Combinação das etiquetas incluídas">
+          <div class="bulk-match-options" role="group" aria-label="Combinação das regras incluídas">
             <button type="button" data-bulk-match="any" class="active" aria-pressed="true">Qualquer uma <small>OU</small></button>
             <button type="button" data-bulk-match="all" aria-pressed="false">Todas juntas <small>E</small></button>
           </div>
         </div>
-        <div id="bulkTagHelper" class="bulk-tag-helper">Adicione uma etiqueta para incluir contatos. Use “Excluir” em outra regra para retirar quem tiver essa etiqueta.</div>
+        <div id="bulkTagHelper" class="bulk-tag-helper">Selecione uma categoria ou etiqueta para incluir conversas. Use “Excluir” para retirar as correspondentes.</div>
       </div>
       <div class="bulk-config-row full">
         <div class="node-field">
@@ -606,6 +606,7 @@
   </div>
 
   <script src="message-formatting.js"></script>
+  <script src="audio-converter.js"></script>
   <script src="editor.js"></script>
   <script src="contacts.js"></script>
 </body>

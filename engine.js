@@ -24,7 +24,9 @@
   let receiptSyncRunning = false;
   let campaignSaveQueue = Promise.resolve();
   let analyticsWriteQueue = Promise.resolve();
+  let flowFailureWriteQueue = Promise.resolve();
   const campaignRunners = new Map();
+  const recentInboundFingerprints = new Map();
   const CONNECTION_PAUSE_MESSAGE =
     "O WhatsApp foi desconectado. Entre na conta desejada e clique em Play para continuar do próximo contato.";
 
@@ -54,6 +56,208 @@
     .toLocaleLowerCase("pt-BR")
     .trim();
 
+  function isDuplicateInbound(message = {}) {
+    const chatId = String(message.chatId || "");
+    const body = normalize(message.body).slice(0, 1200);
+    if (!chatId || !body) return false;
+
+    const now = Date.now();
+    const key = `${chatId}|${body}`;
+    const source = String(message.source || "native");
+    const messageId = String(message.id || "");
+    const previous = recentInboundFingerprints.get(key);
+
+    recentInboundFingerprints.set(key, {
+      at: now,
+      id: messageId,
+      source
+    });
+
+    if (recentInboundFingerprints.size > 500) {
+      for (const [fingerprint, entry] of recentInboundFingerprints) {
+        if (now - Number(entry?.at || 0) > 30000) {
+          recentInboundFingerprints.delete(fingerprint);
+        }
+      }
+    }
+
+    if (!previous || previous.id === messageId || now - previous.at > 8000) {
+      return false;
+    }
+
+    // O fallback visual e o leitor interno podem capturar a mesma mensagem
+    // com IDs diferentes. Nesse caso somente a primeira captura inicia o fluxo.
+    return source === "dom-fallback" || previous.source === "dom-fallback";
+  }
+
+  function failureErrorMessage(error) {
+    return String(error?.message || error || "Falha desconhecida ao executar o fluxo.");
+  }
+
+  function failureContactSnapshot(contact = {}) {
+    return {
+      firstName: String(contact.firstName || ""),
+      lastName: String(contact.lastName || ""),
+      phone: String(contact.phone || ""),
+      tag: String(contact.tag || ""),
+      chatId: String(contact.chatId || ""),
+      isGroup: Boolean(contact.isGroup)
+    };
+  }
+
+  function failureChatName(message = {}, chatId = "") {
+    const contact = message.contact || {};
+    return String(
+      message.chatName ||
+      message.name ||
+      [contact.firstName, contact.lastName].filter(Boolean).join(" ") ||
+      contact.phone ||
+      String(chatId).replace(/@.+$/, "") ||
+      "Contato"
+    ).trim();
+  }
+
+  async function withFlowFailureWriteLock(writer) {
+    if (globalThis.navigator?.locks?.request) {
+      return navigator.locks.request("wf-flow-failure-ledger", writer);
+    }
+    const write = flowFailureWriteQueue.then(writer, writer);
+    flowFailureWriteQueue = write.catch(() => {});
+    return write;
+  }
+
+  async function recordFlowFailure({
+    source = "flow",
+    chatId,
+    message = {},
+    flow = null,
+    startIndex = 0,
+    replyText = "",
+    error,
+    activeFlow = null,
+    failureKey = "",
+    messageText = "",
+    messageIds = []
+  } = {}) {
+    const normalizedChatId = String(chatId || message.chatId || "").trim();
+    if (!normalizedChatId) return null;
+
+    const active = activeFlow || state.activeFlows[normalizedChatId] || null;
+    const activeFlowId = String(active?.flowId || "");
+    const requestedFlowId = String(flow?.id || "");
+    const resolvedFlowId = activeFlowId || requestedFlowId;
+    const resolvedFlow = state.flows.find(item =>
+      String(item.id) === resolvedFlowId
+    ) || flow;
+    const activeIndex = Number(active?.currentIndex);
+    const failedIndex = Number.isFinite(activeIndex)
+      ? Math.max(0, activeIndex)
+      : Math.max(0, Number(startIndex) || 0);
+    const sourceRunId = String(
+      active?.runId ||
+      message.id ||
+      `${resolvedFlowId || "message"}-${Date.now()}`
+    );
+    const dedupeKey = String(failureKey || [
+      source,
+      normalizedChatId,
+      sourceRunId,
+      resolvedFlowId || "message",
+      failedIndex
+    ].join(":"));
+    const now = Date.now();
+    const contact = failureContactSnapshot(message.contact || {});
+    const isFlowFailure = Boolean(resolvedFlowId);
+    const entry = {
+      id: crypto.randomUUID
+        ? crypto.randomUUID()
+        : `flow-failure-${now}-${Math.random()}`,
+      failureKey: dedupeKey,
+      failureSource: String(source || "flow"),
+      chatId: normalizedChatId,
+      chatName: failureChatName(message, normalizedChatId),
+      type: isFlowFailure ? "flow" : "message",
+      flowId: resolvedFlowId,
+      flowName: String(resolvedFlow?.name || (isFlowFailure ? "Fluxo" : "")),
+      flowStartIndex: failedIndex,
+      flowReplyText: String(replyText || ""),
+      flowContext: {
+        body: String(message.body || ""),
+        isGroup: Boolean(message.isGroup || normalizedChatId.endsWith("@g.us")),
+        contact
+      },
+      text: isFlowFailure ? "" : String(messageText || ""),
+      texts: isFlowFailure || !messageText ? [] : [String(messageText)],
+      messageIds: (Array.isArray(messageIds) ? messageIds : [messageIds])
+        .map(value => String(value || ""))
+        .filter(Boolean),
+      scheduledAt: now,
+      repeat: "none",
+      repeatEvery: 1,
+      repeatUnit: "",
+      endAfter: 0,
+      endUnit: "",
+      endsAt: 0,
+      cancelIfReply: false,
+      status: String(error?.code || "") === "WF_ACK_UNCONFIRMED" ? "unconfirmed" : "failed",
+      error: failureErrorMessage(error),
+      errorCode: String(error?.code || ""),
+      createdAt: now,
+      updatedAt: now
+    };
+
+    return withFlowFailureWriteLock(async () => {
+      const stored = await chrome.storage.local.get("wfScheduledMessages");
+      const messages = Array.isArray(stored.wfScheduledMessages)
+        ? stored.wfScheduledMessages
+        : [];
+      const existing = messages.find(item => item?.failureKey === dedupeKey);
+      if (existing) return existing;
+      messages.push(entry);
+      await chrome.storage.local.set({ wfScheduledMessages: messages });
+      return entry;
+    });
+  }
+
+  function activeFlowSnapshot(chatId) {
+    const active = state.activeFlows[String(chatId || "")];
+    return active ? { ...active } : null;
+  }
+
+  async function clearFailedActiveFlow(chatId, activeSnapshot = null) {
+    const normalizedChatId = String(chatId || "");
+    const current = state.activeFlows[normalizedChatId];
+    if (!current) return;
+    if (
+      activeSnapshot?.runId &&
+      current.runId &&
+      current.runId !== activeSnapshot.runId
+    ) return;
+    delete state.activeFlows[normalizedChatId];
+    await saveRuntime();
+  }
+
+  async function handleFlowExecutionFailure(options = {}) {
+    const snapshot = options.activeFlow || activeFlowSnapshot(options.chatId);
+    const failedIndex = Number.isFinite(Number(snapshot?.currentIndex))
+      ? Math.max(0, Number(snapshot.currentIndex))
+      : Math.max(0, Number(options.startIndex) || 0);
+    let failure = null;
+    if (options.failureOwner !== "scheduled") {
+      try {
+        failure = await recordFlowFailure({ ...options, activeFlow: snapshot });
+      } catch (storageError) {
+        console.error("[WA Flow Failure Ledger]", storageError);
+      }
+    }
+    try {
+      await clearFailedActiveFlow(options.chatId, snapshot);
+    } catch (runtimeError) {
+      console.error("[WA Flow Failure Cleanup]", runtimeError);
+    }
+    return { failure, failedIndex, activeFlow: snapshot };
+  }
+
   function applyRuntime(runtime = {}) {
     state.sessions = runtime.sessions || {};
     state.pausedUntil = runtime.pausedUntil || {};
@@ -64,7 +268,9 @@
 
   function reconcileCampaign(campaign) {
     if (!campaign || !Array.isArray(campaign.recipients)) return campaign;
-    const derivedSent = campaign.recipients.filter(recipient => recipient.sentAt).length;
+    const derivedSent = campaign.recipients.filter(recipient =>
+      recipient.state === "sent"
+    ).length;
     const derivedFailed = campaign.recipients.filter(recipient =>
       recipient.state === "failed"
     ).length;
@@ -123,7 +329,7 @@
     let changed = false;
     const repairedPhones = new Set();
     (campaign.recipients || []).forEach(recipient => {
-      if (recipient.sentAt) return;
+      if (recipient.sentAt || recipient.isGroup || String(recipient.chatId || '').endsWith('@g.us')) return;
 
       const displayPhone = [recipient.name, recipient.contact?.firstName]
         .map(value => String(value || "").trim())
@@ -193,7 +399,11 @@
     state.campaigns.forEach(campaign => {
       repairedCampaignPhones = repairWhatsappCampaignRecipientPhones(campaign) || repairedCampaignPhones;
       (campaign.recipients || []).forEach(recipient => {
-        if (recipient.sentAt && !recipient.flowCursor) recipient.state = "sent";
+        if (
+          recipient.sentAt &&
+          !recipient.flowCursor &&
+          recipient.state !== "failed"
+        ) recipient.state = "sent";
         if (recipient.flowCursor) recipient.state = "pending";
       });
       reconcileCampaign(campaign);
@@ -254,7 +464,10 @@
           .some(value => String(value || "").trim());
       }
       if (["image", "video", "audio", "media"].includes(block.type)) {
-        return Boolean(block.dataUrl);
+        const variants = block.type === "audio" ? block.audioVariants : block.mediaVariants;
+        return Boolean(block.dataUrl) || (
+          Array.isArray(variants) && variants.some(item => item?.dataUrl)
+        );
       }
       if (block.type === "flow") {
         const target = state.flows.find(item =>
@@ -412,13 +625,22 @@
     const context = state.currentCampaignContext;
     if (!context) return;
     const campaign = findCampaign(context.campaignId);
+    const recipient = Number.isInteger(context.recipientIndex)
+      ? campaign?.recipients?.[context.recipientIndex]
+      : campaign?.recipients?.find(item => item.phone === context.phone);
     if (
       campaign?.status === "running" &&
       campaign.runnerId === engineInstanceId &&
-      (!context.runToken || campaign.runToken === context.runToken)
+      (!context.runToken || campaign.runToken === context.runToken) &&
+      recipient?.state !== "failed"
     ) return;
-    const error = new Error("A campanha foi pausada antes deste envio.");
-    error.code = "WF_CAMPAIGN_PAUSED";
+    const deliveryFailed = recipient?.state === "failed";
+    const error = new Error(
+      deliveryFailed
+        ? recipient.error || "O WhatsApp recusou uma mensagem desta campanha."
+        : "A campanha foi pausada antes deste envio."
+    );
+    error.code = deliveryFailed ? "WF_NEGATIVE_ACK" : "WF_CAMPAIGN_PAUSED";
     throw error;
   }
 
@@ -602,13 +824,22 @@
         ? campaign.recipients[context.recipientIndex]
         : campaign.recipients.find(item => item.phone === context.phone);
       if (!recipient) return;
+      recipient.messageIds ||= [];
       if (messageId && !recipient.messageIds.includes(messageId)) recipient.messageIds.push(messageId);
+      const active = state.activeFlows[chatId];
+      if (messageId && active?.flowId) {
+        recipient.messageBlocks ||= {};
+        recipient.messageBlocks[messageId] = {
+          flowId: String(active.flowId),
+          blockIndex: Math.max(0, Number(active.currentIndex) || 0)
+        };
+      }
       if (!recipient.sentAt) {
         recipient.sentAt = Date.now();
-        recipient.state = "sending";
         campaign.sent = campaign.recipients.filter(item => item.sentAt).length;
         campaign.lastSent = recipient.name || recipient.phone;
       }
+      if (recipient.state !== "failed") recipient.state = "sending";
     });
   }
 
@@ -806,6 +1037,44 @@
     }
   }
 
+  async function requireServerAck(response, timeout = 15000) {
+    const result = response?.result || {};
+    const messageId = String(result.messageId || "");
+    let ack = Number(result.ack);
+    if (Number.isFinite(ack) && ack < 0) {
+      const error = new Error("O WhatsApp recusou o envio da mensagem.");
+      error.code = "WF_NEGATIVE_ACK";
+      throw error;
+    }
+    if (Number.isFinite(ack) && ack >= 1) return response;
+    if (!messageId) {
+      const error = new Error("O WhatsApp não informou o identificador da mensagem enviada.");
+      error.code = "WF_MISSING_MESSAGE_ID";
+      throw error;
+    }
+    const deadline = Date.now() + Math.max(1000, timeout);
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      assertActiveCampaignCanSend();
+      const checked = await window.WFBridge.command(
+        "CHECK_MESSAGE_ACKS",
+        { messageIds: [messageId] },
+        5000
+      );
+      ack = Number(checked?.result?.acks?.[0]?.ack);
+      if (Number.isFinite(ack) && ack < 0) {
+        const error = new Error("O WhatsApp recusou o envio da mensagem.");
+        error.code = "WF_NEGATIVE_ACK";
+        throw error;
+      }
+      if (Number.isFinite(ack) && ack >= 1) return response;
+    }
+    const error = new Error("Mensagem registrada localmente, mas sem confirmação do servidor do WhatsApp.");
+    error.code = "WF_ACK_UNCONFIRMED";
+    error.messageId = messageId;
+    throw error;
+  }
+
   async function sendText(chatId, text, showTyping, showLinkPreview, typingSeconds = 3) {
     assertActiveCampaignCanSend();
     if (showTyping) {
@@ -841,6 +1110,7 @@
       text: String(resolvedText || ""),
       linkPreview: showLinkPreview === true
     }, 60000);
+    await requireServerAck(result);
     await trackCampaignMessage(chatId, result);
     return result;
   }
@@ -978,7 +1248,23 @@
       }
 
       if (["image", "video", "audio", "media"].includes(block.type)) {
-        if (!block.dataUrl) {
+        const storedVariants = block.type === "audio" ? block.audioVariants : block.mediaVariants;
+        const mediaVariants = Array.isArray(storedVariants)
+          ? storedVariants.filter(item => item?.dataUrl).slice(0, 5)
+          : [];
+        const selectedVariant = mediaVariants.length
+          ? mediaVariants[Math.floor(Math.random() * mediaVariants.length)]
+          : null;
+        const selectedMediaBlock = selectedVariant
+          ? {
+              ...block,
+              fileName: String(selectedVariant.fileName || block.fileName || ""),
+              mimeType: String(selectedVariant.mimeType || block.mimeType || ""),
+              dataUrl: String(selectedVariant.dataUrl || "")
+            }
+          : block;
+
+        if (!selectedMediaBlock.dataUrl) {
           throw new Error(`Arquivo ausente no bloco ${index + 1}.`);
         }
 
@@ -988,8 +1274,13 @@
 
         try {
           assertActiveCampaignCanSend();
+          const {
+            audioVariants: _audioVariants,
+            mediaVariants: _mediaVariants,
+            ...mediaBlockWithoutVariants
+          } = selectedMediaBlock;
           const outgoingBlock = {
-            ...block,
+            ...mediaBlockWithoutVariants,
             caption: interpolateContact(block.caption, message, chatId)
           };
           const mediaResult = await window.WFBridge.command(
@@ -997,6 +1288,7 @@
             { chatId, block: outgoingBlock },
             35000
           );
+          await requireServerAck(mediaResult);
           await trackCampaignMessage(chatId, mediaResult);
         } catch (error) {
           console.error(
@@ -1220,12 +1512,31 @@
   }
 
   function enqueue(message) {
+    if (isDuplicateInbound(message)) {
+      if (message?.id) {
+        state.processed[String(message.id)] = Date.now();
+        saveRuntime().catch(() => {});
+      }
+      console.info(
+        "[WA Flow] Captura duplicada ignorada",
+        String(message?.id || ""),
+        String(message?.source || "native")
+      );
+      return;
+    }
+
     const chatId = message.chatId;
     const previous = state.queues.get(chatId) || Promise.resolve();
 
     const next = previous
       .then(() => processMessage(message))
-      .catch(error => {
+      .catch(async error => {
+        await handleFlowExecutionFailure({
+          source: "automatic-flow",
+          chatId,
+          message,
+          error
+        });
         console.error("[WA Flow Engine v2]", error);
         updateBadge(`erro: ${error.message}`, "error");
       })
@@ -1293,7 +1604,15 @@
 
     const next = previous
       .then(() => executeFlow(flow, message, nextIndex, ""))
-      .catch(error => {
+      .catch(async error => {
+        await handleFlowExecutionFailure({
+          source: "timeout-flow",
+          chatId,
+          message,
+          flow,
+          startIndex: nextIndex,
+          error
+        });
         console.error("[WA Flow Timeout v2]", error);
         updateBadge(`erro no tempo: ${error.message}`, "error");
       })
@@ -1356,22 +1675,106 @@
     enqueue(event.detail);
   });
 
-  window.addEventListener("WF_MESSAGE_ACK", event => {
-    const { messageId, ack } = event.detail || {};
-    if (!messageId || Number(ack) < 3) return;
+  async function handleCampaignMessageAck(detail = {}) {
+    const messageId = String(detail.messageId || "");
+    const ack = Number(detail.ack);
+    if (!messageId || !Number.isFinite(ack)) return;
+
     const campaign = state.campaigns.find(item =>
       item.recipients?.some(recipient =>
-        recipient.messageIds?.includes(String(messageId)) && !recipient.openedAt
+        recipient.messageIds?.includes(messageId)
       )
     );
-    const recipient = campaign?.recipients?.find(item =>
-      item.messageIds?.includes(String(messageId))
-    );
-    if (!campaign || !recipient || recipient.openedAt) return;
+    const recipientIndex = campaign?.recipients?.findIndex(item =>
+      item.messageIds?.includes(messageId)
+    ) ?? -1;
+    const recipient = recipientIndex >= 0
+      ? campaign.recipients[recipientIndex]
+      : null;
+    if (!campaign || !recipient) return;
+
+    if (ack < 0) {
+      const now = Date.now();
+      const error = new Error("O WhatsApp recusou o envio da mensagem.");
+      error.code = "WF_NEGATIVE_ACK";
+      recipient.state = "failed";
+      recipient.error = error.message;
+      recipient.failedAt = now;
+      recipient.failedMessageId = messageId;
+      campaign.errors ||= [];
+      if (!campaign.errors.some(item => item?.messageId === messageId)) {
+        campaign.errors.push({
+          phone: String(recipient.phone || ""),
+          messageId,
+          error: error.message
+        });
+      }
+      reconcileCampaign(campaign);
+      campaign.updatedAt = now;
+      await saveCampaigns();
+
+      const execution = campaignExecutionPlan(campaign);
+      const blockReference = recipient.messageBlocks?.[messageId] || {};
+      const failedFlowId = String(blockReference.flowId || execution.flowId || "");
+      const failedFlow = campaign.sendType === "flow"
+        ? state.flows.find(item => String(item.id) === failedFlowId)
+        : null;
+      const contact = campaignContact(recipient);
+      await recordFlowFailure({
+        source: "campaign-ack",
+        chatId: String(recipient.chatId || detail.chatId || ""),
+        message: {
+          id: `campaign-ack-${campaign.id}-${recipientIndex}-${messageId}`,
+          chatId: String(recipient.chatId || detail.chatId || ""),
+          body: "",
+          fromMe: false,
+          isGroup: Boolean(recipient.isGroup),
+          contact,
+          chatName: recipient.name || ""
+        },
+        flow: failedFlow,
+        startIndex: Math.max(
+          0,
+          Number(blockReference.blockIndex ?? recipient.flowCursor?.blockIndex) || 0
+        ),
+        activeFlow: failedFlow
+          ? {
+              flowId: String(failedFlow.id),
+              currentIndex: Math.max(
+                0,
+                Number(blockReference.blockIndex ?? recipient.flowCursor?.blockIndex) || 0
+              ),
+              runId: `campaign-ack-${campaign.id}-${recipientIndex}-${messageId}`
+            }
+          : {},
+        error,
+        failureKey: `campaign-ack:${campaign.id}:${recipientIndex}:${messageId}`,
+        messageText: String(recipient.lastSentText || execution.text || execution.texts?.[0] || ""),
+        messageIds: [messageId]
+      });
+      if (
+        state.currentCampaignContext?.campaignId === campaign.id &&
+        state.currentCampaignContext?.recipientIndex === recipientIndex
+      ) {
+        await clearFailedActiveFlow(
+          String(recipient.chatId || detail.chatId || ""),
+          activeFlowSnapshot(String(recipient.chatId || detail.chatId || ""))
+        );
+      }
+      return;
+    }
+
+    if (ack < 3 || recipient.openedAt) return;
     recipient.openedAt = Date.now();
     campaign.opened = campaign.recipients.filter(item => item.openedAt).length;
     campaign.updatedAt = Date.now();
-    saveCampaigns();
+    await saveCampaigns();
+  }
+
+  window.addEventListener("WF_MESSAGE_ACK", event => {
+    handleCampaignMessageAck(event.detail || {}).catch(error => {
+      console.error("[WA Flow Campaign ACK]", error);
+    });
   });
 
   function campaignExecutionPlan(campaign) {
@@ -1551,12 +1954,14 @@
       ) break;
 
       const contact = campaignContact(recipient);
-      const phone = String(recipient.phone || contact.phone || "").replace(/\D/g, "");
+      const phone = String(recipient.phone || contact.phone || '').replace(/\D/g, '');
+      const groupChatId = String(recipient.chatId || contact.chatId || '');
+      const isGroup = groupChatId.endsWith('@g.us');
       campaign.nextSend = recipient.name || phone || "Contato inválido";
       campaign.runnerHeartbeatAt = Date.now();
       await saveCampaigns();
 
-      if (!phone) {
+      if (!phone && !isGroup) {
         recipient.state = "failed";
         recipient.error = "Telefone inválido.";
         campaign.errors ||= [];
@@ -1570,19 +1975,21 @@
         continue;
       }
 
-      let chatId = `${phone}@c.us`;
+      let chatId = isGroup ? groupChatId : `${phone}@c.us`;
       const message = {
         id: `bulk-${campaign.id}-${index}`,
         chatId,
         body: "",
         fromMe: false,
-        isGroup: false,
+        isGroup,
         contact
       };
       let pauseAfterAttempt = false;
 
       try {
-        const resolved = await window.WFBridge.command("RESOLVE_CHAT", { chatId }, 30000);
+        const resolved = isGroup
+          ? { result: { chatId: groupChatId } }
+          : await window.WFBridge.command('RESOLVE_CHAT', { chatId }, 30000);
         chatId = String(resolved?.result?.chatId || chatId);
         message.chatId = chatId;
         recipient.chatId = chatId;
@@ -1623,14 +2030,23 @@
           const selectedText = availableTexts[
             Math.floor(Math.random() * availableTexts.length)
           ] || "";
+          const outgoingText = interpolateContact(selectedText, message, chatId);
+          recipient.lastSentText = outgoingText;
           await sendText(
             chatId,
-            interpolateContact(selectedText, message, chatId),
+            outgoingText,
             false,
             true
           );
         }
 
+        if (recipient.state === "failed") {
+          const deliveryError = new Error(
+            recipient.error || "O WhatsApp recusou uma mensagem desta campanha."
+          );
+          deliveryError.code = "WF_NEGATIVE_ACK";
+          throw deliveryError;
+        }
         if (!recipient.sentAt) {
           throw new Error("O fluxo terminou sem confirmar nenhuma mensagem enviada.");
         }
@@ -1639,6 +2055,9 @@
       } catch (error) {
         console.error("[WA Flow Bulk v2]", phone, error);
         const pausedByControl = error?.code === "WF_CAMPAIGN_PAUSED";
+        const negativeAckFailure =
+          error?.code === "WF_NEGATIVE_ACK" ||
+          /whatsapp recusou (?:o )?(?:envio|registro)/i.test(failureErrorMessage(error));
         const knownConnectionFailure = isConnectionFailure(error);
         const connectionAfterError =
           pausedByControl || knownConnectionFailure
@@ -1672,9 +2091,10 @@
             );
           }
           pauseAfterAttempt = true;
-        } else if (recipient.sentAt) {
-          recipient.state = "sent";
-          delete recipient.error;
+        } else if (recipient.state === "failed") {
+          // A confirmação negativa pode chegar de forma assíncrona depois que o
+          // WhatsApp registrou a mensagem localmente. Preserve a falha em vez
+          // de convertê-la novamente em sucesso por causa de sentAt.
         } else {
           recipient.state = "failed";
           recipient.error = error?.message || String(error);
@@ -1682,6 +2102,16 @@
           if (campaign.errors.length < 10) {
             campaign.errors.push({ phone, error: recipient.error });
           }
+          await handleFlowExecutionFailure({
+            source: negativeAckFailure ? "campaign-ack" : "campaign-flow",
+            chatId,
+            message,
+            flow,
+            startIndex: Math.max(0, Number(recipient.flowCursor?.blockIndex) || 0),
+            error,
+            failureKey: `campaign:${campaign.id}:${index}:${campaign.runToken || "run"}`,
+            messageText: String(recipient.lastSentText || "")
+          });
         }
       } finally {
         state.currentCampaignContext = null;
@@ -1937,9 +2367,33 @@
       });
   });
 
+  function emitChatControlResult(requestId, detail = {}) {
+    if (!requestId) return;
+    window.dispatchEvent(new CustomEvent("WF_CHAT_CONTROL_RESULT", {
+      detail: { requestId, ...detail }
+    }));
+  }
+
   window.addEventListener("WF_CHAT_CONTROL", event => {
-    const { action, chatId, flowId } = event.detail || {};
-    if (!chatId) return;
+    const detail = event.detail || {};
+    const {
+      action,
+      chatId,
+      flowId,
+      requestId,
+      failureOwner = "",
+      failureSource = ""
+    } = detail;
+    if (!chatId) {
+      if (["start-flow", "advance-flow"].includes(action)) {
+        emitChatControlResult(requestId, {
+          ok: false,
+          action,
+          error: "Conversa inválida para executar o fluxo."
+        });
+      }
+      return;
+    }
 
     if (action === "pause") {
       state.pausedUntil[chatId] = Number.MAX_SAFE_INTEGER;
@@ -1966,9 +2420,26 @@
 
     if (action === "advance-flow") {
       const active = state.activeFlows[chatId];
-      if (!active?.flowId) return;
+      if (!active?.flowId) {
+        emitChatControlResult(requestId, {
+          ok: false,
+          action,
+          chatId,
+          error: "Não há fluxo ativo para avançar nesta conversa."
+        });
+        return;
+      }
       const flow = state.flows.find(item => String(item.id) === String(active.flowId));
-      if (!flow) return;
+      if (!flow) {
+        emitChatControlResult(requestId, {
+          ok: false,
+          action,
+          chatId,
+          flowId: String(active.flowId),
+          error: "O fluxo ativo não foi encontrado."
+        });
+        return;
+      }
 
       const waitingSession = state.sessions[chatId];
       const nextIndex = waitingSession?.flowId === flow.id
@@ -1983,18 +2454,54 @@
       };
       saveRuntime();
 
+      const flowContext = detail.flowContext || {};
       const message = {
-        id: `manual-advance-${chatId}-${Date.now()}`,
+        id: String(detail.messageId || `manual-advance-${chatId}-${Date.now()}`),
         chatId,
-        body: "",
+        body: String(flowContext.body || ""),
         fromMe: false,
-        isGroup: chatId.endsWith("@g.us")
+        isGroup: Boolean(flowContext.isGroup || chatId.endsWith("@g.us")),
+        contact: flowContext.contact || {},
+        chatName: String(flowContext.chatName || "")
       };
       const next = Promise.resolve()
-        .then(() => executeFlow(flow, message, nextIndex, ""))
-        .catch(error => {
+        .then(() => executeFlow(
+          flow,
+          message,
+          nextIndex,
+          String(detail.replyText || flowContext.body || "")
+        ))
+        .then(() => {
+          emitChatControlResult(requestId, {
+            ok: true,
+            action,
+            chatId,
+            flowId: String(flow.id),
+            startIndex: nextIndex
+          });
+        })
+        .catch(async error => {
+          const failure = await handleFlowExecutionFailure({
+            source: failureSource || "manual-advance",
+            failureOwner,
+            chatId,
+            message,
+            flow,
+            startIndex: nextIndex,
+            replyText: String(detail.replyText || flowContext.body || ""),
+            error
+          });
           console.error("[WA Flow Manual Advance]", error);
           updateBadge(`erro ao avançar: ${error.message}`, "error");
+          emitChatControlResult(requestId, {
+            ok: false,
+            action,
+            chatId,
+            flowId: String(flow.id),
+            failedIndex: failure.failedIndex,
+            error: failureErrorMessage(error),
+            errorCode: String(error?.code || "")
+          });
         })
         .finally(() => {
           if (state.queues.get(chatId) === next) state.queues.delete(chatId);
@@ -2004,28 +2511,83 @@
     }
 
     if (action === "start-flow") {
-      const flow = state.flows.find(item => item.id === flowId);
-      if (!flow) return;
+      const flow = state.flows.find(item => String(item.id) === String(flowId));
+      if (!flow) {
+        emitChatControlResult(requestId, {
+          ok: false,
+          action,
+          chatId,
+          flowId: String(flowId || ""),
+          error: "O fluxo solicitado não foi encontrado."
+        });
+        return;
+      }
 
+      const flowContext = detail.flowContext || {};
+      const requestedStartIndex = Math.max(0, Number(detail.startIndex) || 0);
       const message = {
-        id: `manual-${chatId}-${Date.now()}`,
+        id: String(detail.messageId || `manual-${chatId}-${Date.now()}`),
         chatId,
-        body: "",
+        body: String(flowContext.body || ""),
         fromMe: false,
-        isGroup: chatId.endsWith("@g.us")
+        isGroup: Boolean(flowContext.isGroup || chatId.endsWith("@g.us")),
+        contact: flowContext.contact || {},
+        chatName: String(flowContext.chatName || "")
       };
 
       const previous = state.queues.get(chatId) || Promise.resolve();
       const next = previous
-        .then(() => executeFlow(flow, message, 0, ""))
-        .catch(error => {
+        .then(() => executeFlow(
+          flow,
+          message,
+          requestedStartIndex,
+          String(detail.replyText || flowContext.body || "")
+        ))
+        .then(() => {
+          emitChatControlResult(requestId, {
+            ok: true,
+            action,
+            chatId,
+            flowId: String(flow.id),
+            startIndex: requestedStartIndex
+          });
+        })
+        .catch(async error => {
+          const failure = await handleFlowExecutionFailure({
+            source: failureSource || (failureOwner === "scheduled" ? "scheduled-flow" : "manual-flow"),
+            failureOwner,
+            chatId,
+            message,
+            flow,
+            startIndex: requestedStartIndex,
+            replyText: String(detail.replyText || flowContext.body || ""),
+            error
+          });
           console.error("[WA Flow Manual v2]", error);
           updateBadge(`erro no envio manual: ${error.message}`, "error");
+          emitChatControlResult(requestId, {
+            ok: false,
+            action,
+            chatId,
+            flowId: String(flow.id),
+            failedIndex: failure.failedIndex,
+            error: failureErrorMessage(error),
+            errorCode: String(error?.code || "")
+          });
         })
         .finally(() => {
           if (state.queues.get(chatId) === next) state.queues.delete(chatId);
         });
       state.queues.set(chatId, next);
+      emitChatControlResult(requestId, {
+        ok: true,
+        accepted: true,
+        phase: "accepted",
+        action,
+        chatId,
+        flowId: String(flow.id),
+        startIndex: requestedStartIndex
+      });
     }
   });
 
@@ -2117,7 +2679,9 @@
             firstName: String(contact.firstName || ""),
             lastName: String(contact.lastName || ""),
             phone: String(contact.phone || ""),
-            tag: String(contact.tag || "")
+            tag: String(contact.tag || ''),
+            chatId: String(contact.chatId || ''),
+            isGroup: Boolean(contact.isGroup && String(contact.chatId || '').endsWith('@g.us'))
           };
           return {
             phone: savedContact.phone.replace(/\D/g, ""),
@@ -2125,8 +2689,9 @@
             contact: savedContact,
             state: "pending",
             sentAt: null,
-            chatId: "",
-            chatIds: [],
+            isGroup: savedContact.isGroup,
+            chatId: savedContact.isGroup ? savedContact.chatId : '',
+            chatIds: savedContact.isGroup ? [savedContact.chatId] : [],
             openedAt: null,
             respondedAt: null,
             responseMessageId: "",

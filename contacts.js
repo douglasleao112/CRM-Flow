@@ -1,4 +1,5 @@
 (() => {
+  const bulkProtocolVersion = 14;
   const $ = selector => document.querySelector(selector);
   let contactLists = [];
   let selectedContactListId = "";
@@ -26,6 +27,10 @@
   let whatsappBulkContactsLoaded = false;
   let whatsappBulkContactsLoading = false;
   let selectedBulkTagValues = [];
+  let selectedBulkExcludedTagValues = [];
+  let bulkIncludeMode = "any";
+  let bulkTagRules = [];
+  let bulkTagRuleSequence = 0;
   const bulkControlStates = new Map();
 
   const WHATSAPP_ALL_CONTACTS = "__whatsapp_all__";
@@ -47,6 +52,13 @@
       digits = `55${digits}`;
     }
     return digits;
+  }
+
+  function normalizeWhatsappPhone(value) {
+    // O identificador vindo do próprio WhatsApp já contém o DDI, embora não
+    // venha prefixado por "+". Aplicar normalizePhone aqui acrescentava 55 a
+    // números internacionais de 10/11 dígitos (ex.: 1438... virava 551438...).
+    return String(value || "").replace(/\D/g, "");
   }
 
   function normalizeHeader(value) {
@@ -360,7 +372,7 @@
         WhatsApp — todos os contatos${whatsappCount}
       </option>
       <option value="${WHATSAPP_LABEL_CONTACTS}" ${currentList === WHATSAPP_LABEL_CONTACTS ? "selected" : ""}>
-        WhatsApp — por etiqueta${whatsappLabeledCount}
+        WhatsApp — por categoria ou etiqueta${whatsappLabeledCount}
       </option>
     ` +
       contactLists.map(list => `
@@ -385,91 +397,215 @@
     return [...selectedBulkTagValues];
   }
 
-  function renderSelectedBulkTagChips() {
-    $("#bulkSelectedTags").innerHTML = selectedBulkTagValues.map(tag => `
-      <span class="bulk-selected-chip">
-        ${escapeHtml(tag)}
-        <button type="button" data-remove-bulk-tag="${escapeHtml(tag)}" aria-label="Remover etiqueta ${escapeHtml(tag)}">×</button>
-      </span>
-    `).join("");
+  const BULK_CHAT_CATEGORIES = [
+    ['archived', 'Arquivadas'], ['unread', 'Não lidas'], ['favorite', 'Favoritas'],
+    ['groups', 'Grupos'], ['main', 'Principal'], ['pinned', 'Fixadas']
+  ];
+  function bulkContactMatchesRule(contact, rule) {
+    const fields = {'chat:archived':'isArchived','chat:unread':'isUnread',
+      'chat:favorite':'isFavorite','chat:groups':'isGroup','chat:pinned':'isPinned'};
+    if (rule === 'chat:main') return contact.isArchived === false;
+    if (fields[rule]) return contact[fields[rule]] === true;
+    return (contact.labelRefs || []).some(label => label.key === rule);
+  }
+  function bulkTagOptionsForSource(source = $("#bulkContactList").value) {
+    if ([WHATSAPP_ALL_CONTACTS, WHATSAPP_LABEL_CONTACTS].includes(source)) {
+      const byKey = new Map();
+      whatsappBulkContacts.forEach(contact => (contact.labelRefs || []).forEach(label => {
+        if (!byKey.has(label.key)) byKey.set(label.key, { value: label.key, name: label.name, id: label.id });
+      }));
+      const labels = [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+      const repeatedNames = new Map();
+      labels.forEach(label => {
+        const name = normalizeHeader(label.name);
+        repeatedNames.set(name, (repeatedNames.get(name) || 0) + 1);
+      });
+      const categories = BULK_CHAT_CATEGORIES.map(([key, name]) => ({
+        value: 'chat:' + key, name, displayName: name, category: true,
+        disabled: key === 'favorite' && whatsappBulkContactsLoaded &&
+          (!whatsappBulkContacts.length || !whatsappBulkContacts.every(contact => typeof contact.isFavorite === 'boolean'))
+      }));
+      return categories.concat(labels.map(label => ({
+        ...label,
+        displayName: repeatedNames.get(normalizeHeader(label.name)) > 1 && label.id
+          ? `${label.name} · ID ${label.id}` : label.name
+      })));
+    }
+    const list = contactLists.find(item => item.id === source);
+    return list
+      ? [...new Set(list.contacts.map(contact => contact.tag).filter(Boolean))]
+          .sort((a, b) => a.localeCompare(b, "pt-BR"))
+          .map(tag => ({ value: tag, name: tag, displayName: tag }))
+      : [];
+  }
+
+  function bulkTagNames(values, options = bulkTagOptionsForSource()) {
+    const names = new Map(options.map(option => [option.value, option.displayName]));
+    return values.map(value => names.get(value) || value);
+  }
+
+  function newBulkTagRule(action = "include", tag = "") {
+    return { id: `rule-${++bulkTagRuleSequence}`, action, tag };
+  }
+
+  function syncBulkRuleSelections() {
+    selectedBulkTagValues = [...new Set(bulkTagRules
+      .filter(rule => rule.action === "include" && rule.tag).map(rule => rule.tag))];
+    selectedBulkExcludedTagValues = [...new Set(bulkTagRules
+      .filter(rule => rule.action === "exclude" && rule.tag).map(rule => rule.tag))];
+  }
+
+  function incompleteBulkRuleIndex(source = $("#bulkContactList").value) {
+    if (bulkTagRules.length === 1 && bulkTagRules[0].action === "include" &&
+      !bulkTagRules[0].tag && source !== WHATSAPP_LABEL_CONTACTS) return -1;
+    return bulkTagRules.findIndex(rule => !rule.tag);
   }
 
   function renderBulkTagOptions({ preserveSelection = true } = {}) {
     const source = $("#bulkContactList").value;
     const list = contactLists.find(item => item.id === source);
-    const select = $("#bulkTagFilter");
-    if (!preserveSelection) selectedBulkTagValues = [];
-    const currentTags = new Set(selectedBulkTagValues);
-    const isWhatsappLabels = source === WHATSAPP_LABEL_CONTACTS;
-    const tags = isWhatsappLabels
-      ? [...new Set(whatsappBulkContacts.flatMap(contact => contact.labels || []).filter(Boolean))]
-          .sort((a, b) => a.localeCompare(b, "pt-BR"))
+    const isWhatsappSource = [WHATSAPP_ALL_CONTACTS, WHATSAPP_LABEL_CONTACTS].includes(source);
+    const tags = bulkTagOptionsForSource(source);
+    if (!preserveSelection) {
+      bulkTagRules = [];
+      bulkIncludeMode = "any";
+    }
+    if (!bulkTagRules.length) bulkTagRules.push(newBulkTagRule());
+    const available = new Set(tags.filter(tag => !tag.disabled).map(tag => tag.value));
+    const used = new Set();
+    bulkTagRules.forEach(rule => {
+      if (!isWhatsappSource) rule.action = "include";
+      if (!available.has(rule.tag) || used.has(`${rule.action}:${rule.tag}`)) rule.tag = "";
+      if (rule.tag) used.add(`${rule.action}:${rule.tag}`);
+    });
+    syncBulkRuleSelections();
+    const optionCount = (tag) => isWhatsappSource
+        ? whatsappBulkContacts.filter(contact => bulkContactMatchesRule(contact, tag.value)).length
+        : list.contacts.filter(contact => contact.tag === tag.value).length;
+    $("#bulkTagRules").innerHTML = bulkTagRules.map((rule, index) => {
+      const otherUsed = new Set(bulkTagRules
+        .filter(candidate => candidate.id !== rule.id && candidate.action === rule.action && candidate.tag)
+        .map(candidate => candidate.tag));
+      const availableForRule = tags.filter(tag => !otherUsed.has(tag.value));
+      const emptyLabel = !source ? "Selecione uma origem" : tags.length ? "Selecione uma categoria ou etiqueta" : "Nenhuma etiqueta encontrada";
+      return `<div class="bulk-tag-rule${rule.action === "exclude" ? " is-exclude" : ""}" data-bulk-rule-id="${escapeHtml(rule.id)}">
+        <select data-bulk-rule-action aria-label="Ação da regra ${index + 1}" ${!source ? "disabled" : ""}>
+          <option value="include" ${rule.action === "include" ? "selected" : ""}>Incluir</option>
+          ${isWhatsappSource ? `<option value="exclude" ${rule.action === "exclude" ? "selected" : ""}>Excluir</option>` : ""}
+        </select>
+        <select data-bulk-rule-tag aria-label="Categoria ou etiqueta da regra ${index + 1}" ${!tags.length ? "disabled" : ""}>
+          <option value="">${emptyLabel}</option>
+          ${[true, false].map(category => {
+            const choices = availableForRule.filter(tag => Boolean(tag.category) === category);
+            return choices.length ? `<optgroup label="${category ? 'Conversas do WhatsApp' : 'Etiquetas'}">${choices.map(tag => `<option value="${escapeHtml(tag.value)}" ${tag.value === rule.tag ? 'selected' : ''} ${tag.disabled ? 'disabled' : ''}>${escapeHtml(tag.displayName)}${tag.disabled ? ' — indisponível nesta versão do WhatsApp' : ` (${optionCount(tag)})`}</option>`).join('')}</optgroup>` : '';
+          }).join('')}
+        </select>
+        <button type="button" data-remove-bulk-rule aria-label="Remover regra ${index + 1}" ${bulkTagRules.length === 1 ? "disabled" : ""}>×</button>
+      </div>`;
+    }).join("");
+    $("#bulkAdvancedFilters").classList.toggle("hidden", !source);
+    $("#bulkAddTagRule").disabled = !tags.length || bulkTagRules.some(rule => !rule.tag);
+    $("#bulkIncludeModeWrap").classList.toggle("hidden", !isWhatsappSource || selectedBulkTagValues.length < 2);
+    document.querySelectorAll("[data-bulk-match]").forEach(button => {
+      const active = button.dataset.bulkMatch === bulkIncludeMode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = selectedBulkTagValues.length < 2;
+    });
+    $("#bulkTagHelper").textContent = source === WHATSAPP_LABEL_CONTACTS
+      ? "Adicione ao menos uma regra Incluir. Regras Excluir retiram contatos da seleção."
+      : source === WHATSAPP_ALL_CONTACTS
+        ? "Sem regra Incluir, entram contatos individuais. Principal inclui conversas não arquivadas. Use Excluir Fixadas para retirar as fixadas."
       : list
-        ? [...new Set(list.contacts.map(contact => contact.tag).filter(Boolean))]
-            .sort((a, b) => a.localeCompare(b, "pt-BR"))
-        : [];
-    const disabled = source === WHATSAPP_ALL_CONTACTS || (!list && !isWhatsappLabels) || tags.length === 0;
-    const emptyLabel = source === WHATSAPP_ALL_CONTACTS
-      ? "Todos os contatos já estão selecionados"
-      : isWhatsappLabels
-        ? (tags.length ? "Adicionar uma etiqueta" : "Nenhuma etiqueta encontrada")
-        : list
-          ? (tags.length ? "Adicionar uma etiqueta" : "Esta lista não possui etiquetas")
-          : "Selecione uma origem";
-    select.innerHTML = `<option value="">${emptyLabel}</option>` + (disabled
-      ? ""
-      : tags.filter(tag => !currentTags.has(tag)).map(tag => {
-          const count = isWhatsappLabels
-            ? whatsappBulkContacts.filter(contact => (contact.labels || []).includes(tag)).length
-            : list.contacts.filter(contact => contact.tag === tag).length;
-          return `<option value="${escapeHtml(tag)}">${escapeHtml(tag)} (${count})</option>`;
-        }).join(""));
-    select.disabled = disabled || tags.every(tag => currentTags.has(tag));
-    select.value = "";
-    renderSelectedBulkTagChips();
-    $("#bulkTagHelper").textContent = isWhatsappLabels
-      ? "Selecione uma ou mais etiquetas; contatos repetidos entram apenas uma vez."
-      : list
-        ? "Sem seleção, todos os contatos da lista serão usados."
-        : "Escolha uma origem para ver as etiquetas disponíveis.";
+        ? "Sem regra, todos os contatos da lista entram."
+        : "Escolha uma origem para ver as categorias e etiquetas disponíveis.";
     $("#bulkTagSelectionBadge").textContent = `${selectedBulkTags().length} selecionada(s)`;
+    $("#bulkExcludeSelectionBadge").textContent = `${selectedBulkExcludedTagValues.length} regra${selectedBulkExcludedTagValues.length === 1 ? "" : "s"}`;
+  }
+
+  function bulkRecipientSelection() {
+    const source = $("#bulkContactList").value;
+    const list = contactLists.find(item => item.id === source);
+    const isWhatsappSource = [WHATSAPP_ALL_CONTACTS, WHATSAPP_LABEL_CONTACTS].includes(source);
+    const sourceContacts = isWhatsappSource ? whatsappBulkContacts : list?.contacts || [];
+    const included = sourceContacts.filter(contact => {
+      if (!selectedBulkTagValues.length) return source !== WHATSAPP_LABEL_CONTACTS && !contact.isGroup;
+      const matches = selectedBulkTagValues.map(tag => isWhatsappSource
+        ? bulkContactMatchesRule(contact, tag)
+        : contact.tag === tag);
+      return isWhatsappSource && bulkIncludeMode === "all" ? matches.every(Boolean) : matches.some(Boolean);
+    });
+    const contacts = isWhatsappSource && selectedBulkExcludedTagValues.length
+      ? included.filter(contact => !selectedBulkExcludedTagValues.some(tag =>
+          bulkContactMatchesRule(contact, tag)))
+      : included;
+    return {
+      sourceCount: source === WHATSAPP_LABEL_CONTACTS
+        ? sourceContacts.filter(contact => (contact.labelRefs || []).length).length
+        : sourceContacts.length,
+      includedCount: included.length,
+      excludedCount: included.length - contacts.length,
+      contacts
+    };
   }
 
   function selectedBulkContacts() {
-    const source = $("#bulkContactList").value;
-    if (source === WHATSAPP_ALL_CONTACTS) return whatsappBulkContacts;
-    if (source === WHATSAPP_LABEL_CONTACTS) {
-      const whatsappLabels = selectedBulkTags();
-      return whatsappLabels.length
-        ? whatsappBulkContacts.filter(contact => whatsappLabels.some(label => (contact.labels || []).includes(label)))
-        : [];
-    }
-    const list = contactLists.find(item => item.id === source);
-    const tags = selectedBulkTags();
-    return list
-      ? list.contacts.filter(contact => !tags.length || tags.includes(contact.tag))
-      : [];
+    return bulkRecipientSelection().contacts;
   }
 
   function normalizeWhatsappBulkContacts(chats) {
     const contactsByPhone = new Map();
     (Array.isArray(chats) ? chats : []).forEach(chat => {
       const chatId = String(chat?.chatId || "");
-      if (chat?.isGroup || chatId.endsWith("@g.us") || chatId.endsWith("@broadcast")) return;
-      const phone = normalizePhone(chat?.phone || chatId.split("@")[0]);
+      // Campanhas por etiqueta são destinadas a pessoas. Omitir grupos evita
+      // que uma etiqueta compartilhada provoque um disparo coletivo acidental.
+      if (
+        chat?.isGroup ||
+        chatId.endsWith('@g.us') ||
+        chatId.endsWith('@broadcast') ||
+        chatId.includes('newsletter')
+      ) return;
+      const isGroup = false;
+      const phone = normalizeWhatsappPhone(
+        chat?.phone || (chatId.endsWith('@c.us') ? chatId.split('@')[0] : '')
+      );
       if (phone.length < 10) return;
-      const labels = [...new Set((Array.isArray(chat?.labels) ? chat.labels : [])
-        .map(label => typeof label === "string" ? label : label?.name)
-        .map(label => String(label || "").trim())
-        .filter(Boolean))];
+      const recipientKey = phone;
+      const labelRefs = (Array.isArray(chat?.labels) ? chat.labels : [])
+        .map(label => ({
+          id: String(typeof label === "string" ? "" : label?.id || "").trim(),
+          name: String(typeof label === "string" ? label : label?.name || "").trim()
+        }))
+        .filter(label => label.name)
+        .map(label => ({ ...label, key: label.id ? `id:${label.id}` : `name:${normalizeHeader(label.name)}` }));
+      const previous = contactsByPhone.get(recipientKey);
+      if (previous) {
+        const byKey = new Map([...previous.labelRefs, ...labelRefs].map(label => [label.key, label]));
+        previous.labelRefs = [...byKey.values()];
+        previous.labels = [...new Set(previous.labelRefs.map(label => label.name))];
+        previous.tag = previous.labels.join(', ');
+        for (const key of ['isUnread','isFavorite','isPinned']) {
+          if (typeof chat[key] === 'boolean') previous[key] = previous[key] === true || chat[key];
+        }
+        if (typeof chat.isArchived === 'boolean') previous.isArchived = previous.isArchived === false ? false : chat.isArchived;
+        return;
+      }
+      const uniqueRefs = [...new Map(labelRefs.map(label => [label.key, label])).values()];
+      const labels = [...new Set(uniqueRefs.map(label => label.name))];
       const fullName = String(chat?.name || phone).trim();
-      contactsByPhone.set(phone, {
+      contactsByPhone.set(recipientKey, {
         id: `whatsapp:${chatId || phone}`,
+        chatId, isGroup,
+        isArchived: typeof chat.isArchived === 'boolean' ? chat.isArchived : null,
+        isUnread: typeof chat.isUnread === 'boolean' ? chat.isUnread : Number(chat.unreadCount) > 0,
+        isFavorite: typeof chat.isFavorite === 'boolean' ? chat.isFavorite : null,
+        isPinned: typeof chat.isPinned === 'boolean' ? chat.isPinned : null,
         firstName: fullName,
         lastName: "",
         phone,
         tag: labels.join(", "),
-        labels
+        labels,
+        labelRefs: uniqueRefs
       });
     });
     return [...contactsByPhone.values()].sort((a, b) =>
@@ -482,11 +618,11 @@
     if (whatsappBulkContactsLoaded && !force) return;
     const feedback = $("#bulkFeedback");
     whatsappBulkContactsLoading = true;
-    feedback.textContent = "Carregando contatos e etiquetas do WhatsApp...";
+    feedback.textContent = "Carregando conversas, categorias e etiquetas do WhatsApp...";
     try {
       const whatsappTab = await getWhatsAppTab();
       if (!whatsappTab) throw new Error("Abra o WhatsApp Web antes de carregar os contatos.");
-      const result = await chrome.tabs.sendMessage(whatsappTab.id, { type: "WF_KANBAN_CHATS" });
+      const result = await chrome.tabs.sendMessage(whatsappTab.id, { type: "WF_KANBAN_CHATS", includeGroups: false, forBulk: true });
       if (!result?.ok) throw new Error(result?.error || "O WhatsApp não retornou os contatos.");
       whatsappBulkContacts = normalizeWhatsappBulkContacts(result.chats);
       whatsappBulkContactsLoaded = true;
@@ -506,10 +642,40 @@
   }
 
   function updateBulkRecipientCount() {
-    const count = selectedBulkContacts().length;
-    $("#bulkRecipientCount").textContent = `${count} contato(s)`;
-    $("#bulkContactCountBadge").textContent = `${count} contato${count === 1 ? "" : "s"}`;
+    const selection = bulkRecipientSelection();
+    const count = selection.contacts.length;
+    const source = $("#bulkContactList").value;
+    $("#bulkRecipientCount").textContent = `${count} contato${count === 1 ? "" : "s"} receber${count === 1 ? "á" : "ão"}`;
+    $("#bulkContactCountBadge").textContent = `${selection.sourceCount} contato${selection.sourceCount === 1 ? "" : "s"}`;
     $("#bulkTagSelectionBadge").textContent = `${selectedBulkTags().length} selecionada(s)`;
+    $("#bulkExcludeSelectionBadge").textContent = `${selectedBulkExcludedTagValues.length} regra${selectedBulkExcludedTagValues.length === 1 ? "" : "s"}`;
+    const includedNames = bulkTagNames(selectedBulkTagValues);
+    const excludedNames = bulkTagNames(selectedBulkExcludedTagValues);
+    const inclusionRule = !includedNames.length
+      ? "Todos os contatos da origem"
+      : includedNames.length === 1
+        ? `Com ${includedNames[0]}`
+        : bulkIncludeMode === "all"
+          ? `Com todas: ${includedNames.join(" + ")}`
+          : `Com qualquer uma: ${includedNames.join(" ou ")}`;
+    const incompleteRule = incompleteBulkRuleIndex(source);
+    $("#bulkFilterRule").textContent = !source
+      ? "Escolha uma origem para montar o público."
+      : incompleteRule >= 0
+        ? `Escolha uma categoria ou etiqueta na regra ${incompleteRule + 1} ou remova essa regra antes de iniciar.`
+      : source === WHATSAPP_LABEL_CONTACTS && !selectedBulkTagValues.length
+        ? "Adicione ao menos uma regra Incluir para escolher os destinatários."
+        : `${inclusionRule}${excludedNames.length ? `, exceto quem tiver ${excludedNames.join(" ou ")}` : ""}.`;
+    $("#bulkFilterBreakdown").innerHTML = source
+      ? `<span>${selection.sourceCount} na origem</span><span>→</span><span>${selection.includedCount} após inclusão</span><span>→</span><span class="bulk-excluded-count">${selection.excludedCount} excluído${selection.excludedCount === 1 ? "" : "s"}</span><span>→</span><b>${count} receber${count === 1 ? "á" : "ão"}</b>`
+      : "";
+    $("#bulkRecipientPreviewSummary").textContent = `Ver destinatários (${count})`;
+    $("#bulkRecipientPreviewList").innerHTML = count
+      ? selection.contacts.map(contact => {
+          const name = [contact.firstName, contact.lastName].filter(Boolean).join(" ") || contact.phone;
+          return `<div class="bulk-recipient-item" role="listitem"><div><strong>${escapeHtml(name)}</strong><small>${contact.isGroup ? "Grupo do WhatsApp" : `+${escapeHtml(contact.phone || "")}`}</small></div><div class="bulk-recipient-labels">${escapeHtml((contact.labels || (contact.tag ? [contact.tag] : [])).join(", "))}</div></div>`;
+        }).join("")
+      : '<div class="bulk-recipient-empty">Nenhum contato corresponde aos filtros atuais.</div>';
   }
 
   function campaignStatusLabel(status) {
@@ -1342,6 +1508,7 @@
   document.querySelectorAll("[data-app-section]").forEach(button => {
     button.addEventListener("click", () => {
       const section = button.dataset.appSection;
+      if (section !== "flows" && typeof closeLibrary === "function") closeLibrary(false);
       document.querySelectorAll("[data-app-section]").forEach(item =>
         item.classList.toggle("active", item === button)
       );
@@ -1620,16 +1787,38 @@
       $("#bulkFeedback").textContent = "";
     }
   });
-  $("#bulkTagFilter").addEventListener("change", event => {
-    const tag = event.target.value;
-    if (tag && !selectedBulkTagValues.includes(tag)) selectedBulkTagValues.push(tag);
+  $("#bulkTagRules").addEventListener("change", event => {
+    const row = event.target.closest("[data-bulk-rule-id]");
+    const rule = bulkTagRules.find(candidate => candidate.id === row?.dataset.bulkRuleId);
+    if (!rule) return;
+    if (event.target.matches("[data-bulk-rule-action]")) {
+      rule.action = event.target.value === "exclude" &&
+        [WHATSAPP_ALL_CONTACTS, WHATSAPP_LABEL_CONTACTS].includes($("#bulkContactList").value)
+        ? "exclude" : "include";
+    } else if (event.target.matches("[data-bulk-rule-tag]")) {
+      rule.tag = event.target.value;
+    } else return;
     renderBulkTagOptions();
     updateBulkRecipientCount();
   });
-  $("#bulkSelectedTags").addEventListener("click", event => {
-    const button = event.target.closest("[data-remove-bulk-tag]");
+  $("#bulkTagRules").addEventListener("click", event => {
+    const button = event.target.closest("[data-remove-bulk-rule]");
     if (!button) return;
-    selectedBulkTagValues = selectedBulkTagValues.filter(tag => tag !== button.dataset.removeBulkTag);
+    const id = button.closest("[data-bulk-rule-id]")?.dataset.bulkRuleId;
+    bulkTagRules = bulkTagRules.filter(rule => rule.id !== id);
+    renderBulkTagOptions();
+    updateBulkRecipientCount();
+  });
+  $("#bulkAddTagRule").addEventListener("click", () => {
+    bulkTagRules.push(newBulkTagRule());
+    renderBulkTagOptions();
+    updateBulkRecipientCount();
+    $("#bulkTagRules [data-bulk-rule-id]:last-child [data-bulk-rule-action]")?.focus();
+  });
+  $("#bulkIncludeModeWrap").addEventListener("click", event => {
+    const button = event.target.closest("[data-bulk-match]");
+    if (!button || button.disabled) return;
+    bulkIncludeMode = button.dataset.bulkMatch === "all" ? "all" : "any";
     renderBulkTagOptions();
     updateBulkRecipientCount();
   });
@@ -2042,8 +2231,8 @@
         lastReady = ready;
         if (ready?.transientError) lastError = String(ready.transientError);
         if (
-          ready?.protocol === 13 &&
-          ready?.bridgeVersion === 13 &&
+          ready?.protocol === bulkProtocolVersion &&
+          ready?.bridgeVersion === bulkProtocolVersion &&
           ready.bridgeReady &&
           ready.authenticated &&
           ready.connected
@@ -2052,8 +2241,8 @@
           throw new Error(`Falha ao carregar o motor no WhatsApp: ${ready.error}`);
         }
         if (
-          (ready?.protocol && ready.protocol !== 13) ||
-          (ready?.bridgeVersion && ready.bridgeVersion !== 13)
+          (ready?.protocol && ready.protocol !== bulkProtocolVersion) ||
+          (ready?.bridgeVersion && ready.bridgeVersion !== bulkProtocolVersion)
         ) {
           protocolMismatchSince ||= Date.now();
           $("#bulkFeedback").textContent = "Aguardando a versão atual da extensão no WhatsApp...";
@@ -2081,8 +2270,8 @@
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     if (
-      (lastReady?.protocol && lastReady.protocol !== 13) ||
-      (lastReady?.bridgeVersion && lastReady.bridgeVersion !== 13)
+      (lastReady?.protocol && lastReady.protocol !== bulkProtocolVersion) ||
+      (lastReady?.bridgeVersion && lastReady.bridgeVersion !== bulkProtocolVersion)
     ) {
       throw new Error("Recarregue a extensão em chrome://extensions e depois atualize o WhatsApp Web.");
     }
@@ -2102,22 +2291,19 @@
   }
 
   async function ensureBulkReceiver(tabId) {
+    // Starting/resuming a campaign must never reload its WhatsApp session.
     try {
       const ready = await chrome.tabs.sendMessage(tabId, { type: "WF_BULK_READY" });
-      if (ready?.protocol === 13 && ready?.bridgeVersion === 13) {
-        if (ready.bridgeReady && ready.authenticated && ready.connected) return ready;
-        return waitForBulkReceiver(tabId);
-      }
-      await chrome.tabs.reload(tabId);
+      if (ready?.protocol === bulkProtocolVersion &&
+          ready?.bridgeVersion === bulkProtocolVersion &&
+          ready.bridgeReady && ready.authenticated && ready.connected) return ready;
       return waitForBulkReceiver(tabId);
     } catch (error) {
       const message = String(error?.message || error);
-      if (!/Receiving end does not exist|Could not establish connection/i.test(message)) {
-        throw error;
+      if (/Receiving end does not exist|Could not establish connection/i.test(message)) {
+        throw new Error("O motor da extensão não está disponível nesta aba. Atualize o WhatsApp Web manualmente e aguarde as conversas carregarem antes de dar Play.");
       }
-
-      await chrome.tabs.reload(tabId);
-      return waitForBulkReceiver(tabId);
+      throw error;
     }
   }
 
@@ -2126,6 +2312,8 @@
     const list = contactLists.find(item => item.id === contactSource);
     const isWhatsappSource = [WHATSAPP_ALL_CONTACTS, WHATSAPP_LABEL_CONTACTS].includes(contactSource);
     const selectedTags = selectedBulkTags();
+    const selectedTagNames = bulkTagNames(selectedTags);
+    const excludedTagNames = bulkTagNames(selectedBulkExcludedTagValues);
     const contacts = selectedBulkContacts();
     const type = $("#bulkSendType").value;
     const flowId = $("#bulkFlow").value;
@@ -2144,13 +2332,20 @@
       return void (feedback.textContent = "Já existe uma campanha em execução ou pausada.");
     }
     if (!list && !isWhatsappSource) return void (feedback.textContent = "Selecione uma origem de contatos.");
+    const incompleteRule = incompleteBulkRuleIndex(contactSource);
+    if (incompleteRule >= 0) {
+      return void (feedback.textContent = `Escolha uma categoria ou etiqueta na regra ${incompleteRule + 1} ou remova essa regra antes de iniciar.`);
+    }
     if (contactSource === WHATSAPP_LABEL_CONTACTS && !selectedTags.length) {
-      return void (feedback.textContent = "Selecione ao menos uma etiqueta do WhatsApp.");
+      return void (feedback.textContent = "Selecione ao menos uma categoria ou etiqueta do WhatsApp.");
     }
     if (!contacts.length) return void (feedback.textContent = "Nenhum contato corresponde ao filtro selecionado.");
     if (type === "flow" && !flowId) return void (feedback.textContent = "Selecione um fluxo.");
     if (type === "message" && !texts.length) return void (feedback.textContent = "Escreva ao menos uma mensagem.");
-    if (!confirm(`Iniciar o envio para ${contacts.length} contato(s)?`)) return;
+    const filterSummary = isWhatsappSource
+      ? `${selectedTagNames.length ? `Incluir (${bulkIncludeMode === "all" ? "todas juntas" : "qualquer uma"}): ${selectedTagNames.join(", ")}` : "Incluir: todos os contatos"}${excludedTagNames.length ? `\nExcluir se tiver: ${excludedTagNames.join(", ")}` : ""}`
+      : selectedTagNames.length ? `Etiquetas da lista: ${selectedTagNames.join(", ")}` : "Todos os contatos da lista";
+    if (!confirm(`Iniciar o envio para ${contacts.length} contato(s)?\n${filterSummary}`)) return;
 
     const button = $("#startBulkSend");
     bulkRequestPending = true;
@@ -2166,10 +2361,10 @@
       const result = await sendBulkRequest(whatsappTab.id, {
         name: campaignName,
         listName: isWhatsappSource
-          ? (contactSource === WHATSAPP_ALL_CONTACTS ? "WhatsApp — todos os contatos" : `WhatsApp — ${selectedTags.join(", ")}`)
+          ? (contactSource === WHATSAPP_ALL_CONTACTS ? "WhatsApp — todos os contatos" : `WhatsApp — ${selectedTagNames.join(", ")}`)
           : list.name,
         listId: isWhatsappSource ? contactSource : list.id,
-        tagFilter: selectedTags.join(", "),
+        tagFilter: filterSummary.replaceAll("\n", " | "),
         contacts,
         sendType: type,
         flowId,
