@@ -19,7 +19,7 @@ test("o chatbot lê Primary e General dentro da sessão do Instagram", () => {
 test("a ponte encaminha o inbox autenticado ao background", () => {
   assert.match(loader, /flowsiChatbotReadInbox/);
   assert.match(loader, /flowsi-chatbot-inbox-request/);
-  assert.match(background, /transport: "instagram-page"/);
+  assert.match(background, /instagram-page\+visible-inbox/);
   assert.match(background, /extension-background-fallback/);
 });
 
@@ -56,11 +56,13 @@ test("o chatbot resolve o usuário e o thread_id real antes de responder", () =>
   assert.match(main, /chatbotThreadCache\.set\(username/);
 });
 
-test("quando a API falha, o chatbot lê apenas mensagens recentes do inbox visível", () => {
+test("o chatbot sempre combina a API com mensagens recentes do inbox visível", () => {
   assert.match(loader, /flowsiChatbotReadVisibleInbox/);
   assert.match(loader, /minutes <= 5/);
   assert.match(loader, /visibleConversationRows\(\)/);
   assert.match(loader, /flowsiChatbotDomInboxState/);
   assert.match(loader, /\^\(voce\|you\)\(:\| enviou\| sent\)/);
   assert.match(background, /transport: "instagram-visible-inbox"/);
+  assert.match(background, /instagram-page\+visible-inbox/);
+  assert.match(background, /\.\.\.visibleThreads/);
 });

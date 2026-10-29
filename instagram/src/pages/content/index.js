@@ -2466,9 +2466,18 @@ function installChatbotTriggerPolling() {
     chrome.storage.local.get("bots", ({ bots = [] }) => {
       if (!bots.some(bot => bot?.start === true && bot?.type === "comment")) return;
       checking = true;
-      chrome.runtime.sendMessage({ action: "checkNotifications" }, () => {
+      chrome.runtime.sendMessage({ action: "checkNotifications" }, response => {
         checking = false;
-        void chrome.runtime.lastError;
+        const error = chrome.runtime.lastError;
+        document.documentElement.setAttribute(
+          "data-flowsi-chatbot-check",
+          JSON.stringify({
+            at: new Date().toISOString(),
+            success: !error && response?.success === true,
+            result: response?.result || null,
+            error: error?.message || response?.error || null
+          })
+        );
       });
     });
   };

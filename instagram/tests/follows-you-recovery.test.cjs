@@ -21,7 +21,9 @@ assert.ok(
   "relationship recovery must load on normal Instagram navigation"
 );
 assert.match(worker, /chrome\.tabs\.query\(\{ url: "https:\/\/www\.instagram\.com\/\*" \}\)/);
-assert.match(worker, /files: \["instagram\/src\/pages\/content\/follows-you-recovery\.js"\]/);
+assert.match(worker, /"instagram\/src\/pages\/content\/follows-you-recovery\.js"/);
+assert.match(worker, /"instagram\/src\/pages\/content\/contact-loader\.js"/);
+assert.match(worker, /"instagram\/src\/pages\/content\/index\.js"/);
 assert.doesNotMatch(worker, /chrome\.tabs\.reload/);
 assert.match(recovery, /action: "flowsiFetchRelationship"/);
 assert.match(recovery, /typeof response\?\.followsYou !== "boolean"/);

@@ -1,4 +1,8 @@
 (() => {
+  const BRIDGE_VERSION = "2026.10.29.1";
+  if (window.__crmFlowContactLoaderVersion === BRIDGE_VERSION) return;
+  window.__crmFlowContactLoaderVersion = BRIDGE_VERSION;
+
   const REQUEST_SOURCE = "flowsi-contact-loader";
   const RESPONSE_SOURCE = "flowsi-contact-scraper";
   const CHATBOT_INBOX_REQUEST_SOURCE = "flowsi-chatbot-inbox-request";

@@ -1156,6 +1156,18 @@ async function fetchDirectInboxFolder(folder, csrfToken) {
 }
 
 async function fetchDirectInboxFromInstagramTab(tabId, csrfToken) {
+  const readVisibleInbox = async () => {
+    try {
+      const visible = await chrome.tabs.sendMessage(tabId, {
+        action: "flowsiChatbotReadVisibleInbox"
+      });
+      return visible?.success && Array.isArray(visible.threads)
+        ? visible.threads
+        : [];
+    } catch (_) {
+      return [];
+    }
+  };
   try {
     const response = await chrome.tabs.sendMessage(tabId, {
       action: "flowsiChatbotReadInbox"
@@ -1163,11 +1175,20 @@ async function fetchDirectInboxFromInstagramTab(tabId, csrfToken) {
     if (!response?.success) {
       throw new Error(response?.error || "A página do Instagram não respondeu.");
     }
+    const visibleThreads = await readVisibleInbox();
     return {
-      primary: Array.isArray(response.primary) ? response.primary : [],
+      // The Instagram API may return HTTP 200 with a stale/incomplete inbox.
+      // Keep it as the primary source, but append the recent visible rows so
+      // a new keyword cannot be missed merely because the API lagged behind.
+      primary: [
+        ...(Array.isArray(response.primary) ? response.primary : []),
+        ...visibleThreads
+      ],
       general: Array.isArray(response.general) ? response.general : [],
       viewerId: String(response.viewerId || ""),
-      transport: "instagram-page"
+      transport: visibleThreads.length
+        ? "instagram-page+visible-inbox"
+        : "instagram-page"
     };
   } catch (pageError) {
     try {
@@ -1183,14 +1204,10 @@ async function fetchDirectInboxFromInstagramTab(tabId, csrfToken) {
         pageError: pageError?.message || String(pageError)
       };
     } catch (backgroundError) {
-      const visible = await chrome.tabs.sendMessage(tabId, {
-        action: "flowsiChatbotReadVisibleInbox"
-      });
-      if (!visible?.success) {
-        throw new Error(visible?.error || backgroundError?.message || pageError?.message);
-      }
+      const visibleThreads = await readVisibleInbox();
+      if (!visibleThreads.length) throw backgroundError;
       return {
-        primary: Array.isArray(visible.threads) ? visible.threads : [],
+        primary: visibleThreads,
         general: [],
         viewerId: "",
         transport: "instagram-visible-inbox",

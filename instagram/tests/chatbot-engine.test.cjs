@@ -33,6 +33,12 @@ const chrome = {
           viewerId: "100"
         };
       }
+      if (payload?.action === "flowsiChatbotReadVisibleInbox") {
+        return {
+          success: true,
+          threads: [{ thread_id: "visible-recent", users: [], items: [] }]
+        };
+      }
       if (payload?.action === "flowsiChatbotSendMessageMain") {
         sentMessages.push(payload);
         return {
@@ -128,8 +134,8 @@ vm.runInNewContext(source, context, { filename: backgroundPath });
   );
 
   const pageInbox = await api.fetchDirectInboxFromInstagramTab(1, "csrf");
-  assert.equal(pageInbox.transport, "instagram-page");
-  assert.equal(pageInbox.primary.length, 1);
+  assert.equal(pageInbox.transport, "instagram-page+visible-inbox");
+  assert.equal(pageInbox.primary.length, 2);
   assert.equal(pageInbox.general.length, 1);
   assert.equal(pageInbox.viewerId, "100");
 
