@@ -64,6 +64,11 @@
     const deadline = Date.now() + 7000;
     while (Date.now() < deadline) {
       await waitForVisibleInbox(200);
+      const profileLink = document.querySelector(
+        `main a[href="/${CSS.escape(username)}/"], main a[href="/${CSS.escape(username)}"]`
+      );
+      const openedThreadId = location.pathname.match(/^\/direct\/t\/(\d+)/)?.[1] || "";
+      if (!profileLink || !openedThreadId) continue;
       const inbound = [...document.querySelectorAll(
         '[role="article"][aria-roledescription="message"]'
       )].map((article, index) => {
@@ -86,7 +91,7 @@
 
       if (!inbound.length) continue;
       const senderId = String(profile.userId || profile.pk || profile.profileId || username);
-      const threadId = String(profile.threadId || `dom-${username}`);
+      const threadId = openedThreadId;
       return {
         thread_id: threadId,
         users: [{
@@ -170,12 +175,17 @@
           .replace(/\b(ha )?\d+\s*(min|minuto|minutos|m)\b.*$/i, "")
           .trim();
       }
+      if (!preview || /^(voce|you)(:| enviou| sent)/i.test(normalizeVisibleText(preview))) continue;
       const groupedUnreadCount = unreadMessageCount(preview);
-      if (groupedUnreadCount) {
+      // The inbox preview is not authoritative: Instagram replaces it with
+      // counters ("2 new messages") and can collapse repeated equal texts.
+      // Open every recent inbound row, read the real message articles and
+      // capture the numeric thread_id from the resulting Direct URL.
+      {
         const expandedThread = await readUnreadMessagesFromConversation(
           row,
           profile,
-          groupedUnreadCount
+          groupedUnreadCount || 1
         );
         if (expandedThread) {
           threads.push(expandedThread);
@@ -186,10 +196,9 @@
             eventId: expandedThread.items.at(-1)?.item_id || "",
             observedAt: Date.now()
           };
+          continue;
         }
-        continue;
       }
-      if (!preview || /^(voce|you)(:| enviou| sent)/i.test(normalizeVisibleText(preview))) continue;
       const username = normalizeVisibleText(profile.username).replace(/^@+/, "");
       // Include the visible time/unread state so two consecutive messages
       // with the same keyword do not collapse into the same event forever.

@@ -51,6 +51,8 @@ test("o chatbot resolve o usuário e o thread_id real antes de responder", () =>
   assert.match(background, /candidate\.threadId/);
   assert.match(main, /existingThreadId = ""/);
   assert.match(main, /resolveChatbotThread\([\s\S]*existingThreadId/);
+  assert.match(main, /thread_id from the resulting Direct URL|authoritative/);
+  assert.match(main, /\^\\d\+\$\/\.test\(String\(hintedThreadId/);
   assert.match(main, /normalize\(user\?\.username\) === normalize\(username\)/);
   assert.match(main, /recipient_users: `\["\$\{userId\}"\]`/);
   assert.match(main, /chatbotThreadCache\.set\(username/);
@@ -75,4 +77,14 @@ test("o chatbot abre contadores de mensagens não lidas e recupera o texto real"
   assert.match(loader, /aria-roledescription="message"/);
   assert.match(loader, /message from/);
   assert.match(loader, /dom-open-/);
+  assert.match(loader, /openedThreadId/);
+  assert.match(loader, /groupedUnreadCount \|\| 1/);
+});
+
+test("o diagnóstico informa candidatos, correspondências, envios e erros", () => {
+  assert.match(background, /candidates: candidates\.length/);
+  assert.match(background, /stats\.matched/);
+  assert.match(background, /stats\.sent/);
+  assert.match(background, /stats\.errors/);
+  assert.match(background, /directThreads: uniqueThreads\.length,\s*direct/);
 });

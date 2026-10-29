@@ -1286,6 +1286,13 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
   }
   const candidates = [...candidatesById.values()];
   const directBots = bots.filter(bot => botSourceEnabled(bot, "triggerDirect"));
+  const stats = {
+    candidates: candidates.length,
+    matched: 0,
+    sent: 0,
+    errors: 0,
+    skippedSeen: 0
+  };
 
   // Establish a watermark without swallowing a trigger that arrived moments
   // before the first poll after the bot was created or the extension reloaded.
@@ -1315,12 +1322,16 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
 
   for (const candidate of candidatesToProcess
     .sort((left, right) => left.timestamp - right.timestamp)) {
-    if (seen.has(candidate.itemId)) continue;
+    if (seen.has(candidate.itemId)) {
+      stats.skippedSeen += 1;
+      continue;
+    }
     const matchingBots = directBots.filter(bot => botMatchesText(bot, candidate.text));
     if (!matchingBots.length) {
       seen.add(candidate.itemId);
       continue;
     }
+    stats.matched += 1;
     let allSucceeded = true;
     for (const bot of matchingBots) {
       const template = findTemplate(quickMessages, bot);
@@ -1347,8 +1358,10 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
           transport: sendResult?.transport || "already-completed",
           matchedText: candidate.text.slice(0, 120)
         });
+        stats.sent += 1;
       } catch (error) {
         allSucceeded = false;
+        stats.errors += 1;
         await appendChatbotDiagnostic({
           status: "error",
           source: "direct-or-story",
@@ -1365,6 +1378,7 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
     flowsiChatbotSeenDirect: [...seen].slice(-CHATBOT_SEEN_LIMIT),
     flowsiChatbotCompletedActions: [...completedActions].slice(-1000)
   });
+  return stats;
 }
 
 async function checkNotifications() {
@@ -1421,7 +1435,7 @@ async function checkNotifications() {
         error: directInbox.error || null
       }
     });
-    await processDirectInbox(
+    const direct = await processDirectInbox(
       tabId,
       uniqueThreads,
       bots,
@@ -1429,7 +1443,8 @@ async function checkNotifications() {
     );
     return {
       notifications: notifications.length,
-      directThreads: uniqueThreads.length
+      directThreads: uniqueThreads.length,
+      direct
     };
   } catch (error) {
     console.error("Notification check failed:", error);

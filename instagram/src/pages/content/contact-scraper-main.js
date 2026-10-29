@@ -342,6 +342,17 @@
   async function resolveChatbotThread(username, hintedThreadId, headers, formHeaders) {
     const cached = chatbotThreadCache.get(username);
     if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.threadId;
+    // A numeric ID captured from /direct/t/<id>/ is already the authoritative
+    // one-to-one thread. Do not discard it in favor of endpoints that can be
+    // unavailable or return 404 for otherwise valid Instagram sessions.
+    if (/^\d+$/.test(String(hintedThreadId || ""))) {
+      chatbotThreadCache.set(username, {
+        threadId: String(hintedThreadId),
+        userId: "",
+        at: Date.now()
+      });
+      return String(hintedThreadId);
+    }
     const encoded = encodeURIComponent(username);
     const profileUrls = [
       `/api/v1/web/search/topsearch/?context=blended&query=${encoded}&include_reel=true`,
@@ -397,9 +408,6 @@
       } catch (error) {
         failures.push(error?.message || String(error));
       }
-    }
-    if (/^\d+$/.test(hintedThreadId)) {
-      failures.push(`ID antigo rejeitado: ${hintedThreadId}`);
     }
     throw new Error(`Não foi possível localizar a conversa real de @${username} (${failures.join("; ")}).`);
   }
