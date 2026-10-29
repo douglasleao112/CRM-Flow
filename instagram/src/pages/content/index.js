@@ -1483,11 +1483,9 @@ function installNotebookProfileNavigation() {
 function installKanbanMenuToggle() {
   if (window.__flowsiKanbanMenuToggleInstalled) return;
   window.__flowsiKanbanMenuToggleInstalled = true;
-  // The React sidebar already toggles the Kanban state when its own button is
-  // clicked. Do not intercept that click: the previous interception clicked
-  // the Instagram button internally and incorrectly navigated to the home
-  // page. Native behavior now opens on the first click and closes on the
-  // second while preserving /direct/inbox/ underneath.
+  // The React sidebar owns this toggle. When the active Kanban icon is clicked
+  // again it closes the overlay and restores /direct/inbox/ underneath, without
+  // an extra document-level click interception.
 }
 
 function extendKanbanSyncTimeout() {

@@ -13864,14 +13864,25 @@ const yn = (e) => (t) => {
         );
       }, []));
     const d = (l, g) => {
-        if (
-          (l.preventDefault(),
-          !window.location.href.includes("instagram.com/direct/"))
-        ) {
+        l.preventDefault();
+        const flowsiClosingKanban_20261029 = g && e;
+        if (flowsiClosingKanban_20261029) {
+          const flowsiInboxLink_20261029 = document.querySelector(
+            'a[href="/direct/inbox/"]',
+          );
+          if (window.location.pathname !== "/direct/inbox/") {
+            flowsiInboxLink_20261029
+              ? flowsiInboxLink_20261029.click()
+              : yg("/direct/inbox/");
+          }
+          (t(!1), n(null));
+          return;
+        }
+        if (!window.location.href.includes("instagram.com/direct/")) {
           const h = document.querySelector('a[href="/direct/inbox/"]');
           h == null || h.click();
         }
-        (t((h) => (g ? !h : !1)), n(null));
+        (t(g ? !0 : !1), n(null));
       },
       c = (l) => {
         n(r === l ? null : l);
