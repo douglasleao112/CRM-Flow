@@ -10481,6 +10481,8 @@ function Mg({ setActiveOverlay: e, updateKanbanColumn: t }) {
       loading: S("checking_for_kanban_updates"),
       success: S("kanban_updates_available"),
       error: S("failed_to_update_kanban_updates"),
+    }, {
+      loading: { duration: 2e3 },
     })
       .then(() => {
         P();

@@ -62,6 +62,7 @@ test("a coluna Todas oferece carregar mais depois do último card", () => {
 
 test("as mensagens do Kanban usam a fila vertical de notificações", () => {
   assert.match(board, /window\.__flowsiToast = Y/);
+  assert.match(board, /loading: \{ duration: 2e3 \}/);
   assert.match(content, /toastApi\.loading\(message, \{ id: toastId \}\)/);
   assert.match(content, /toastApi\.success\("Kanban atualizado com sucesso\."/);
   assert.match(content, /window\.addEventListener\("flowsi-toast-ready", render\)/);
