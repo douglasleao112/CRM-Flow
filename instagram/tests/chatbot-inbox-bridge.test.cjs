@@ -86,5 +86,7 @@ test("o diagnóstico informa candidatos, correspondências, envios e erros", () 
   assert.match(background, /stats\.matched/);
   assert.match(background, /stats\.sent/);
   assert.match(background, /stats\.errors/);
+  assert.match(background, /stats\.lastError/);
+  assert.match(background, /lastAttempt/);
   assert.match(background, /directThreads: uniqueThreads\.length,\s*direct/);
 });

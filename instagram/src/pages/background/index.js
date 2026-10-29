@@ -1291,7 +1291,9 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
     matched: 0,
     sent: 0,
     errors: 0,
-    skippedSeen: 0
+    skippedSeen: 0,
+    lastError: null,
+    lastAttempt: null
   };
 
   // Establish a watermark without swallowing a trigger that arrived moments
@@ -1332,6 +1334,11 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
       continue;
     }
     stats.matched += 1;
+    stats.lastAttempt = {
+      username: candidate.username,
+      threadId: candidate.threadId,
+      text: candidate.text.slice(0, 120)
+    };
     let allSucceeded = true;
     for (const bot of matchingBots) {
       const template = findTemplate(quickMessages, bot);
@@ -1362,6 +1369,7 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
       } catch (error) {
         allSucceeded = false;
         stats.errors += 1;
+        stats.lastError = error?.message || String(error);
         await appendChatbotDiagnostic({
           status: "error",
           source: "direct-or-story",

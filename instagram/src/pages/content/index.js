@@ -1,3 +1,4 @@
+(() => {
 const isInvalidatedExtensionContext = value =>
   /Extension context invalidated/i.test(String(value?.message || value || ""));
 
@@ -2506,3 +2507,4 @@ preload(() => import("../../../assets/js/index.e4b3aa7a.js"), [])
   .catch(error => {
     if (!isInvalidatedExtensionContext(error)) throw error;
   });
+})();

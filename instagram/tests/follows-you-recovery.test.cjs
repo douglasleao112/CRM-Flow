@@ -9,6 +9,10 @@ const recovery = fs.readFileSync(
   path.join(root, "instagram", "src", "pages", "content", "follows-you-recovery.js"),
   "utf8"
 );
+const content = fs.readFileSync(
+  path.join(root, "instagram", "src", "pages", "content", "index.js"),
+  "utf8"
+);
 
 const instagramScript = manifest.content_scripts.find(entry =>
   entry.matches?.includes("https://www.instagram.com/*") &&
@@ -30,5 +34,7 @@ assert.match(recovery, /typeof response\?\.followsYou !== "boolean"/);
 assert.match(recovery, /renderBadge\(current\.header, response\.followsYou\)/);
 assert.match(recovery, /data-flowsi-follows-you-status", "complete"/);
 assert.match(recovery, /hideBadge\(current\.header\)/);
+assert.match(content, /^\(\(\) => \{/);
+assert.match(content, /\}\)\(\);\s*$/);
 
-console.log("follows-you-recovery: 10 assertions passed");
+console.log("follows-you-recovery: 12 assertions passed");
