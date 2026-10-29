@@ -37,6 +37,75 @@
     });
   }
 
+  const waitForVisibleInbox = milliseconds => new Promise(resolve =>
+    window.setTimeout(resolve, milliseconds)
+  );
+
+  const unreadMessageCount = value => {
+    const normalized = normalizeVisibleText(value);
+    const match = normalized.match(/^(\d+)\s+(?:new messages?|novas mensagens?|mensagens novas?)$/i);
+    return match ? Math.max(1, Math.min(Number(match[1]) || 1, 20)) : 0;
+  };
+
+  const stableMessageHash = value => {
+    let hash = 2166136261;
+    for (const character of String(value || "")) {
+      hash ^= character.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  };
+
+  async function readUnreadMessagesFromConversation(row, profile, expectedCount) {
+    const username = normalizeVisibleText(profile?.username).replace(/^@+/, "");
+    if (!username || !expectedCount) return null;
+    row.click();
+
+    const deadline = Date.now() + 7000;
+    while (Date.now() < deadline) {
+      await waitForVisibleInbox(200);
+      const inbound = [...document.querySelectorAll(
+        '[role="article"][aria-roledescription="message"]'
+      )].map((article, index) => {
+        const text = String(article.innerText || article.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!text) return null;
+        const container = article.parentElement;
+        const actionLabels = [...(container?.querySelectorAll("[aria-label]") || [])]
+          .map(element => normalizeVisibleText(element.getAttribute("aria-label")))
+          .filter(Boolean);
+        const belongsToContact = actionLabels.some(label =>
+          label.includes(`mensagem de ${username}`) ||
+          label.includes(`message from ${username}`) ||
+          label.includes(`message by ${username}`)
+        );
+        if (!belongsToContact) return null;
+        return { text, index };
+      }).filter(Boolean).slice(-expectedCount);
+
+      if (!inbound.length) continue;
+      const senderId = String(profile.userId || profile.pk || profile.profileId || username);
+      const threadId = String(profile.threadId || `dom-${username}`);
+      return {
+        thread_id: threadId,
+        users: [{
+          pk: senderId,
+          id: senderId,
+          username,
+          full_name: profile.full_name || profile.name || username
+        }],
+        items: inbound.map(({ text, index }, offset) => ({
+          item_id: `dom-open-${username}-${stableMessageHash(`${index}|${text}`)}`,
+          user_id: senderId,
+          text,
+          timestamp: (Date.now() - (inbound.length - offset - 1) * 1000) * 1000
+        }))
+      };
+    }
+    return null;
+  }
+
   async function readVisibleChatbotInbox() {
     const stored = await chrome.storage.local.get([
       "contactList",
@@ -100,6 +169,25 @@
           .replace(/\b(ha )?(alguns segundos|few seconds|agora|now)\b.*$/i, "")
           .replace(/\b(ha )?\d+\s*(min|minuto|minutos|m)\b.*$/i, "")
           .trim();
+      }
+      const groupedUnreadCount = unreadMessageCount(preview);
+      if (groupedUnreadCount) {
+        const expandedThread = await readUnreadMessagesFromConversation(
+          row,
+          profile,
+          groupedUnreadCount
+        );
+        if (expandedThread) {
+          threads.push(expandedThread);
+          const username = normalizeVisibleText(profile.username).replace(/^@+/, "");
+          const signature = expandedThread.items.map(item => item.item_id).join("|");
+          nextState[username] = {
+            signature,
+            eventId: expandedThread.items.at(-1)?.item_id || "",
+            observedAt: Date.now()
+          };
+        }
+        continue;
       }
       if (!preview || /^(voce|you)(:| enviou| sent)/i.test(normalizeVisibleText(preview))) continue;
       const username = normalizeVisibleText(profile.username).replace(/^@+/, "");

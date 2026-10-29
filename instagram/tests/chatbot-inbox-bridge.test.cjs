@@ -66,3 +66,13 @@ test("o chatbot sempre combina a API com mensagens recentes do inbox visível", 
   assert.match(background, /instagram-page\+visible-inbox/);
   assert.match(background, /\.\.\.visibleThreads/);
 });
+
+test("o chatbot abre contadores de mensagens não lidas e recupera o texto real", () => {
+  assert.match(loader, /unreadMessageCount/);
+  assert.match(loader, /new messages/);
+  assert.match(loader, /readUnreadMessagesFromConversation/);
+  assert.match(loader, /row\.click\(\)/);
+  assert.match(loader, /aria-roledescription="message"/);
+  assert.match(loader, /message from/);
+  assert.match(loader, /dom-open-/);
+});
