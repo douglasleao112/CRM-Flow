@@ -2687,7 +2687,6 @@ $("#importFile").addEventListener("change", async event => {
 const FULL_BACKUP_FORMAT = "mkt-flow-full-backup";
 const FULL_BACKUP_LEGACY_FORMAT = ["whats", "flow-full-backup"].join("");
 const FULL_BACKUP_VERSION = 1;
-const FULL_BACKUP_MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 function fullBackupTimestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -2797,10 +2796,6 @@ $("#fullBackupImportFile").addEventListener("change", async event => {
   let previousData = null;
 
   try {
-    if (file.size > FULL_BACKUP_MAX_FILE_BYTES) {
-      throw new Error("O arquivo excede o limite de 50 MB.");
-    }
-
     const payload = JSON.parse(await file.text());
     if (
       ![FULL_BACKUP_FORMAT, FULL_BACKUP_LEGACY_FORMAT].includes(payload?.format)

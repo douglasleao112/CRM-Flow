@@ -6,6 +6,8 @@ const root = path.join(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 const popup = fs.readFileSync(path.join(root, "popup.html"), "utf8");
 const popupScript = fs.readFileSync(path.join(root, "popup.js"), "utf8");
+const editor = fs.readFileSync(path.join(root, "editor.html"), "utf8");
+const editorScript = fs.readFileSync(path.join(root, "editor.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "crm-background.js"), "utf8");
 const instagramWorker = fs.readFileSync(
   path.join(root, "instagram/src/pages/background/index.js"),
@@ -44,6 +46,23 @@ assert.equal((popup.match(/<div>\s*<strong>/g) || []).length, 1);
 assert.match(popup, /CRM para Instagram/);
 assert.match(popupScript, /setPopupTab\("instagram"\)/);
 assert.match(popupScript, /https:\/\/www\.instagram\.com\/direct\/inbox\//);
+const fullBackupInput = editor.match(/<input\s+id="fullBackupImportFile"[^>]*>/)?.[0] || "";
+assert.ok(fullBackupInput, "full backup import input must exist");
+assert.doesNotMatch(
+  fullBackupInput,
+  /\saccept=/,
+  "full backup import must allow selecting files with any extension"
+);
+assert.doesNotMatch(
+  editorScript,
+  /FULL_BACKUP_MAX_FILE_BYTES|arquivo excede o limite de 50 MB/,
+  "full backup import must not impose an application-level file-size limit"
+);
+assert.match(
+  editorScript,
+  /Este não é um arquivo de backup completo válido do CRM Flow/,
+  "full backup content validation must remain enabled"
+);
 assert.doesNotMatch(
   instagramWorker,
   /runtime\.onInstalled[\s\S]{0,500}(?:tabs\.create|tabs\.update)/,
