@@ -62,7 +62,7 @@ async function writeWatchdogState(value) {
       await chrome.storage.session.set({ [WATCHDOG_STORAGE_KEY]: watchdogMemoryState });
     }
   } catch (error) {
-    console.debug("[WA Flow] Estado do watchdog mantido somente em memoria.", error);
+    console.debug("[CRM Flow] Estado do watchdog mantido somente em memoria.", error);
   }
 }
 
@@ -125,7 +125,7 @@ async function reloadWhatsAppTab(tab, entry, now, reason) {
     // A recarga normal preserves cookies, IndexedDB, localStorage and the
     // sessão vinculada do WhatsApp. Never use bypassCache or clear browsing data.
     await chrome.tabs.reload(tab.id);
-    console.warn("[WA Flow] Aba do WhatsApp recuperada pelo watchdog.", reason);
+    console.warn("[CRM Flow] Aba do WhatsApp recuperada pelo watchdog.", reason);
     return true;
   } catch (error) {
     entry.lastFailure = `Falha ao recarregar: ${error?.message || String(error)}`.slice(0, 240);
@@ -210,7 +210,7 @@ async function runWhatsAppWatchdog(reason = "alarm") {
         }
       });
     } catch (error) {
-      console.warn(`[WA Flow] Watchdog (${reason}) não concluiu a verificação:`, error);
+      console.warn(`[CRM Flow] Watchdog (${reason}) não concluiu a verificação:`, error);
     }
   })().finally(() => {
     watchdogRunInFlight = null;
@@ -228,7 +228,7 @@ async function ensureWatchdogAlarm() {
       });
     }
   } catch (error) {
-    console.warn("[WA Flow] Não foi possível iniciar o watchdog:", error);
+    console.warn("[CRM Flow] Não foi possível iniciar o watchdog:", error);
   }
 }
 
@@ -296,7 +296,7 @@ async function protectWhatsAppTabs({ reload = false } = {}) {
       if (reload) await chrome.tabs.reload(tab.id);
     }));
   } catch (error) {
-    console.warn("[WA Flow] Não foi possível proteger a aba do WhatsApp:", error);
+    console.warn("[CRM Flow] Não foi possível proteger a aba do WhatsApp:", error);
   }
 }
 

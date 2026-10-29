@@ -89,7 +89,7 @@
   }
 
   function opusTagsPacket() {
-    const vendor = asciiBytes("WhatsApp Flow");
+    const vendor = asciiBytes("Mkt Flow");
     const packet = new Uint8Array(8 + 4 + vendor.length + 4);
     const view = new DataView(packet.buffer);
     writeAscii(packet, 0, "OpusTags");

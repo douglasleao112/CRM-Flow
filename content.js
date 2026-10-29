@@ -36,7 +36,7 @@
         .filter(timestamp => Number.isFinite(timestamp) && now - timestamp < windowMs);
     } catch {}
     if (history.length >= 2) {
-      console.warn("[WA Flow] Recarga automática bloqueada para evitar ciclo.", reason);
+      console.warn("[CRM Flow] Recarga automática bloqueada para evitar ciclo.", reason);
       return;
     }
     history.push(now);
@@ -57,7 +57,7 @@
     try {
       script.src = chrome.runtime.getURL(file);
     } catch (error) {
-      console.warn("[WA Flow] Contexto da extensão foi substituído; recarregando a página.", error);
+      console.warn("[CRM Flow] Contexto da extensão foi substituído; recarregando a página.", error);
       scheduleRecoveryReload("extension-context", 250);
       return;
     }
@@ -302,9 +302,9 @@
         };
         window.dispatchEvent(new CustomEvent("WF_INCOMING_ACTIVITY", { detail: message }));
         window.dispatchEvent(new CustomEvent("WF_NEW_MESSAGE", { detail: message }));
-        console.info("[WA Flow] Incoming message captured by DOM fallback", message.id);
+        console.info("[CRM Flow] Incoming message captured by DOM fallback", message.id);
       } catch (error) {
-        console.debug("[WA Flow] DOM fallback could not resolve the active chat", error);
+        console.debug("[CRM Flow] DOM fallback could not resolve the active chat", error);
       }
     };
 
@@ -546,7 +546,7 @@
               ? ""
               : currentBridge
               ? (result.loaderError || bridgeError)
-              : "A ponte do WhatsFlow está desatualizada."
+              : "A ponte do CRM Flow está desatualizada."
           });
         })
         .catch(error => sendResponse({
@@ -1005,6 +1005,10 @@
     const scheduledImport = panel.querySelector("#wf-scheduled-import");
     const scheduledImportFile = panel.querySelector("#wf-scheduled-import-file");
     const scheduledTransferFeedback = panel.querySelector("#wf-scheduled-transfer-feedback");
+    const scheduledTransferFormats = new Set([
+      "mkt-flow-scheduled-messages",
+      ["whats", "flow-scheduled-messages"].join("")
+    ]);
     const activeFlowCount = panel.querySelector("#wf-active-flow-count");
     const chatControlBadge = root.querySelector("#wf-chat-control-badge");
     const messageTemplateForm = panel.querySelector("#wf-message-template-form");
@@ -1277,7 +1281,7 @@
           `${pendingMessages} mensagem(ns) programada(s) e ${currentChatFlowCount} fluxo ativo nesta conversa`;
       } catch (error) {
         if (!String(error?.message || error).includes("Extension context invalidated")) {
-          console.debug("[WA Flow] Não foi possível atualizar os indicadores.", error);
+          console.debug("[CRM Flow] Não foi possível atualizar os indicadores.", error);
         }
       }
     }
@@ -1698,7 +1702,7 @@
           feedback.textContent = flows.length
             ? "Os fluxos estão disponíveis, mas a conversa ainda não foi identificada. Feche e abra este painel para tentar novamente."
             : "Nenhum fluxo disponível.";
-          console.debug("[WA Flow] Conversa ativa ainda não identificada:", chatError);
+          console.debug("[CRM Flow] Conversa ativa ainda não identificada:", chatError);
         }
 
         pauseButton.disabled = flows.length === 0 || !activeChatId;
@@ -1788,7 +1792,7 @@
       } catch (error) {
         populateScheduleFlowOptions([]);
         scheduleFeedback.textContent = "Não foi possível carregar os fluxos salvos.";
-        console.error("[WA Flow] Falha ao carregar fluxos para o disparo em massa:", error);
+        console.error("[CRM Flow] Falha ao carregar fluxos para o disparo em massa:", error);
       }
     });
 
@@ -2125,7 +2129,7 @@
           .replace(/^-+|-+$/g, "")
           .slice(0, 40) || "conversa";
         const payload = {
-          format: "whatsflow-scheduled-messages",
+          format: "mkt-flow-scheduled-messages",
           version: 1,
           exportedAt: new Date().toISOString(),
           source: bulkScheduleColumnId
@@ -2145,7 +2149,7 @@
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement("a");
         anchor.href = url;
-        anchor.download = `whatsflow-agendamentos-${safeName}-${new Date().toISOString().slice(0, 10)}.json`;
+        anchor.download = `mkt-flow-agendamentos-${safeName}-${new Date().toISOString().slice(0, 10)}.json`;
         anchor.style.display = "none";
         document.body.appendChild(anchor);
         anchor.click();
@@ -2170,7 +2174,7 @@
       try {
         const importedFile = JSON.parse(await file.text());
         if (
-          importedFile?.format !== "whatsflow-scheduled-messages"
+          !scheduledTransferFormats.has(importedFile?.format)
           || importedFile?.version !== 1
           || !Array.isArray(importedFile?.messages)
         ) {
@@ -2723,7 +2727,7 @@
             // Em uma repetição após timeout, envia o mesmo texto sem a prévia.
             retryWithoutLinkPreview,
             // Antes de repetir um timeout, procura no histórico a mensagem que
-            // pode ter sido enviada sem devolver a confirmação ao WhatsFlow.
+            // pode ter sido enviada sem devolver a confirmação ao CRM Flow.
             retryDedupeSince: isRetry
               ? Number(item.retryDedupeSince || item.scheduledAt || Date.now())
               : 0,
@@ -2868,7 +2872,7 @@
             target.errorCode = "";
           }
         } catch (error) {
-          console.debug("[WA Flow] A confirmação tardia ainda não apareceu.", error);
+          console.debug("[CRM Flow] A confirmação tardia ainda não apareceu.", error);
         }
         target.updatedAt = now;
       }
@@ -3258,7 +3262,7 @@
           disposeInvalidExtensionContext();
           return;
         }
-        console.error("[WA Flow] Falha ao verificar mensagens programadas:", error);
+        console.error("[CRM Flow] Falha ao verificar mensagens programadas:", error);
       }
     }
 

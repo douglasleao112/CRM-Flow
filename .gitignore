@@ -1,5 +1,7 @@
 _metadata/
 *.before-filter-text
+*.bak
+*.bak-*
 *.zip
 *.crx
 *.pem

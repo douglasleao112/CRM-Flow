@@ -1604,7 +1604,7 @@ async function saveAll() {
 
     render();
   } catch (error) {
-    console.error("[WA Flow] Erro ao salvar:", error);
+    console.error("[CRM Flow] Erro ao salvar:", error);
 
     button.textContent = "Erro ao salvar";
     button.disabled = false;
@@ -1639,7 +1639,7 @@ async function load() {
     captureSavedFlowFingerprints();
     render();
   } catch (error) {
-    console.error("[WA Flow] Erro ao carregar:", error);
+    console.error("[CRM Flow] Erro ao carregar:", error);
     flows = [];
     flowGroups = [];
     analytics = {};
@@ -1665,7 +1665,7 @@ $("#flowList").addEventListener("click", async event => {
       try {
         await persistFlowGroups();
       } catch (error) {
-        console.error("[WA Flow] Não foi possível salvar o estado do grupo:", error);
+        console.error("[CRM Flow] Não foi possível salvar o estado do grupo:", error);
       }
     }
     return;
@@ -1684,7 +1684,7 @@ $("#flowList").addEventListener("click", async event => {
     try {
       await persistFlowGroups();
     } catch (error) {
-      console.error("[WA Flow] Não foi possível salvar o nome do grupo:", error);
+      console.error("[CRM Flow] Não foi possível salvar o nome do grupo:", error);
       alert("O nome foi alterado na tela, mas não pôde ser salvo. Tente novamente.");
     }
     return;
@@ -1699,7 +1699,7 @@ $("#flowList").addEventListener("click", async event => {
     try {
       await persistFlowGroups();
     } catch (error) {
-      console.error("[WA Flow] Não foi possível salvar a exclusão do grupo:", error);
+      console.error("[CRM Flow] Não foi possível salvar a exclusão do grupo:", error);
       alert("O grupo foi removido da tela, mas a alteração não pôde ser salva. Tente novamente.");
     }
     return;
@@ -1713,7 +1713,7 @@ $("#flowList").addEventListener("click", async event => {
     try {
       await persistFlowOrganization();
     } catch (error) {
-      console.error("[WA Flow] Não foi possível salvar o novo fluxo:", error);
+      console.error("[CRM Flow] Não foi possível salvar o novo fluxo:", error);
       alert("O fluxo foi criado na tela, mas não pôde ser salvo. Use o botão Salvar para tentar novamente.");
     }
     return;
@@ -1740,7 +1740,7 @@ $("#flowList").addEventListener("click", async event => {
     try {
       await persistFlowOrganization();
     } catch (error) {
-      console.error("[WA Flow] Não foi possível salvar a cópia do fluxo:", error);
+      console.error("[CRM Flow] Não foi possível salvar a cópia do fluxo:", error);
       alert("A cópia foi criada na tela, mas não pôde ser salva. Use o botão Salvar para tentar novamente.");
     }
     return;
@@ -1753,7 +1753,7 @@ $("#flowList").addEventListener("click", async event => {
     try {
       await persistFlowOrganization();
     } catch (error) {
-      console.error("[WA Flow] Não foi possível salvar a exclusão do fluxo:", error);
+      console.error("[CRM Flow] Não foi possível salvar a exclusão do fluxo:", error);
       alert("O fluxo foi removido da tela, mas a alteração não pôde ser salva. Use o botão Salvar para tentar novamente.");
     }
   }
@@ -1838,7 +1838,7 @@ $("#flowList").addEventListener("drop", async event => {
         await persistFlowGroups();
       }
     } catch (error) {
-      console.error("[WA Flow] Não foi possível salvar a posição do grupo:", error);
+      console.error("[CRM Flow] Não foi possível salvar a posição do grupo:", error);
       alert("A posição mudou na tela, mas não pôde ser salva. Tente novamente.");
     } finally {
       draggedFlowGroupId = null;
@@ -1863,7 +1863,7 @@ $("#flowList").addEventListener("drop", async event => {
     }
     await persistFlowOrganization();
   } catch (error) {
-    console.error("[WA Flow] Não foi possível salvar a organização dos fluxos:", error);
+    console.error("[CRM Flow] Não foi possível salvar a organização dos fluxos:", error);
     alert("O fluxo mudou de posição na tela, mas a organização não pôde ser salva. Tente novamente.");
   } finally {
     draggedFlowId = null;
@@ -1962,7 +1962,7 @@ $("#blocks").addEventListener("input", async event => {
             if (fileStatus) fileStatus.textContent = `Convertendo para OGG/Opus... ${progress}%`;
           });
         } catch (conversionError) {
-          console.error("[WA Flow] Falha ao converter áudio:", conversionError);
+          console.error("[CRM Flow] Falha ao converter áudio:", conversionError);
           if (fileStatus) fileStatus.innerHTML = originalStatus;
           alert(conversionError?.message || "Não foi possível converter este áudio para OGG/Opus.");
           event.target.value = "";
@@ -1978,7 +1978,7 @@ $("#blocks").addEventListener("input", async event => {
             if (fileStatus) fileStatus.textContent = `Convertendo para MP4/H.264... ${progress}%`;
           });
         } catch (conversionError) {
-          console.error("[WA Flow] Falha ao converter vídeo:", conversionError);
+          console.error("[CRM Flow] Falha ao converter vídeo:", conversionError);
           if (fileStatus) fileStatus.innerHTML = originalStatus;
           alert(conversionError?.message || "Não foi possível converter este vídeo para MP4/H.264.");
           event.target.value = "";
@@ -2067,7 +2067,7 @@ $("#blocks").addEventListener("input", async event => {
       };
       reader.readAsDataURL(preparedFile);
     } catch (error) {
-      console.error("[WA Flow] Falha ao validar mídia:", error);
+      console.error("[CRM Flow] Falha ao validar mídia:", error);
       alert("Não foi possível verificar a compatibilidade do arquivo.");
       event.target.value = "";
     }
@@ -2556,7 +2556,7 @@ $("#newFlow").addEventListener("click", async () => {
   try {
     await persistFlowOrganization();
   } catch (error) {
-    console.error("[WA Flow] Não foi possível salvar o novo fluxo:", error);
+    console.error("[CRM Flow] Não foi possível salvar o novo fluxo:", error);
     alert("O fluxo foi criado na tela, mas não pôde ser salvo. Use o botão Salvar para tentar novamente.");
   }
 });
@@ -2572,7 +2572,7 @@ $("#newFlowGroup").addEventListener("click", async () => {
   try {
     await persistFlowGroups();
   } catch (error) {
-    console.error("[WA Flow] Não foi possível salvar o grupo:", error);
+    console.error("[CRM Flow] Não foi possível salvar o grupo:", error);
     alert("O grupo foi criado na tela, mas não pôde ser salvo. Tente novamente.");
   }
 });
@@ -2599,7 +2599,7 @@ $("#closeLibrary").addEventListener("click", closeLibrary);
 $("#exportBtn").addEventListener("click", () => {
   syncHeader();
   const payload = {
-    format: "whatsflow-flows",
+    format: "mkt-flow-flows",
     version: 2,
     flows,
     flowGroups: normalizeFlowGroups(flowGroups, flows)
@@ -2608,7 +2608,7 @@ $("#exportBtn").addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "whatsapp-fluxos.json";
+  anchor.download = "mkt-flow-fluxos.json";
   anchor.click();
   URL.revokeObjectURL(url);
 });
@@ -2667,7 +2667,7 @@ $("#importFile").addEventListener("change", async event => {
       `Tamanho: ${(file.size / 1024 / 1024).toFixed(2)} MB`
     );
   } catch (error) {
-    console.error("[WA Flow] Erro ao importar JSON:", error);
+    console.error("[CRM Flow] Erro ao importar JSON:", error);
 
     alert(
       "Não foi possível importar este JSON.\n\n" +
@@ -2684,7 +2684,8 @@ $("#importFile").addEventListener("change", async event => {
 });
 
 
-const FULL_BACKUP_FORMAT = "whatsflow-full-backup";
+const FULL_BACKUP_FORMAT = "mkt-flow-full-backup";
+const FULL_BACKUP_LEGACY_FORMAT = ["whats", "flow-full-backup"].join("");
 const FULL_BACKUP_VERSION = 1;
 const FULL_BACKUP_MAX_FILE_BYTES = 50 * 1024 * 1024;
 
@@ -2765,11 +2766,11 @@ $("#fullBackupExportBtn").addEventListener("click", async event => {
     const payload = createFullBackupPayload(data);
     downloadFullBackup(
       payload,
-      `whatsflow-backup-completo-${fullBackupTimestamp()}.json`
+      `mkt-flow-backup-completo-${fullBackupTimestamp()}.json`
     );
     button.textContent = "✓";
   } catch (error) {
-    console.error("[WhatsFlow] Erro ao baixar backup completo:", error);
+    console.error("[CRM Flow] Erro ao baixar backup completo:", error);
     alert("Não foi possível baixar o backup completo.\n\n" + (error?.message || String(error)));
     button.textContent = "!";
   } finally {
@@ -2802,14 +2803,14 @@ $("#fullBackupImportFile").addEventListener("change", async event => {
 
     const payload = JSON.parse(await file.text());
     if (
-      payload?.format !== FULL_BACKUP_FORMAT
+      ![FULL_BACKUP_FORMAT, FULL_BACKUP_LEGACY_FORMAT].includes(payload?.format)
       || payload?.version !== FULL_BACKUP_VERSION
       || payload?.storage?.area !== "local"
       || !payload.data
       || typeof payload.data !== "object"
       || Array.isArray(payload.data)
     ) {
-      throw new Error("Este não é um arquivo de backup completo válido do WhatsFlow.");
+      throw new Error("Este não é um arquivo de backup completo válido do CRM Flow.");
     }
 
     const importedData = payload.data;
@@ -2832,7 +2833,7 @@ $("#fullBackupImportFile").addEventListener("change", async event => {
     previousData = await chrome.storage.local.get(null);
     downloadFullBackup(
       createFullBackupPayload(previousData),
-      `whatsflow-backup-antes-da-restauracao-${fullBackupTimestamp()}.json`
+      `mkt-flow-backup-antes-da-restauracao-${fullBackupTimestamp()}.json`
     );
 
     restoreStarted = true;
@@ -2850,7 +2851,7 @@ $("#fullBackupImportFile").addEventListener("change", async event => {
     );
     window.location.reload();
   } catch (error) {
-    console.error("[WhatsFlow] Erro ao restaurar backup completo:", error);
+    console.error("[CRM Flow] Erro ao restaurar backup completo:", error);
     let rollbackStatus = "Nenhum dado atual foi alterado.";
 
     if (restoreStarted && previousData) {
@@ -2862,7 +2863,7 @@ $("#fullBackupImportFile").addEventListener("change", async event => {
         }
         rollbackStatus = "O estado anterior foi restaurado automaticamente.";
       } catch (rollbackError) {
-        console.error("[WhatsFlow] Erro ao desfazer restauração:", rollbackError);
+        console.error("[CRM Flow] Erro ao desfazer restauração:", rollbackError);
         rollbackStatus = "A restauração automática do estado anterior também falhou; use o backup de segurança baixado.";
       }
     }

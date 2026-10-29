@@ -1,0 +1,476 @@
+{
+  "extension_name": {
+    "message": "Flowsi CRM para Instagram"
+  },
+  "extension_description": {
+    "message": "Flowsi es un CRM que permite organizar tu Instagram para aumentar tus ventas"
+  },
+  "first_column_title": {
+    "message": "Todos los Chats"
+  },
+  "create_column": {
+    "message": "Crear nueva columna"
+  },
+  "column_name": {
+    "message": "Ingresa el nombre de la columna"
+  },
+  "create_column_button_text": {
+    "message": "Crear"
+  },
+  "cancel_text": {
+    "message": "Cancelar"
+  },
+  "delete_column": {
+    "message": "¿Estás seguro de que deseas eliminar esta columna?"
+  },
+  "rename_column": {
+    "message": "Renombrar etiqueta: "
+  },
+  "update_text": {
+    "message": "Actualizar"
+  },
+  "updated_column_name": {
+    "message": "Ingresa el nuevo nombre de la columna"
+  },
+  "confirm_text": {
+    "message": "Confirmar"
+  },
+  "edit_message": {
+    "message": "Editar Mensaje"
+  },
+  "create_new_message": {
+    "message": "Crear nuevo mensaje"
+  },
+  "create_message_text": {
+    "message": "Crear Mensaje"
+  },
+  "update_message_text": {
+    "message": "Actualizar Mensaje"
+  },
+  "existing_bots": {
+    "message": "Bots Existentes"
+  },
+  "select_a_dm_template": {
+    "message": "Selecciona una plantilla de DM"
+  },
+  "contact_us_text": {
+    "message": "Contáctanos"
+  },
+  "join_us_text": {
+    "message": "Únete con tu cuenta de Google"
+  },
+  "general_settings_text": {
+    "message": "Configuraciones Generales"
+  },
+  "download_backup_text": {
+    "message": "Descargar Respaldo"
+  },
+  "upload_backup_text": {
+    "message": "Subir Respaldo"
+  },
+  "add_label_text": {
+    "message": "Agregar al CRM"
+  },
+  "login_success_msg": {
+    "message": "¡Inicio de sesión exitoso!"
+  },
+  "bot_saved_msg": {
+    "message": "Bot guardado con éxito"
+  },
+  "bot_deleted_msg": {
+    "message": "Bot eliminado con éxito"
+  },
+  "backup_restored_success_text": {
+    "message": "¡Respaldo restaurado con éxito!"
+  },
+  "new_column_success_msg": {
+    "message": "Nueva columna creada con éxito"
+  },
+  "profile_removed_success_msg": {
+    "message": "Perfil eliminado con éxito de esta columna"
+  },
+  "column_deleted_success_msg": {
+    "message": "Columna eliminada con éxito"
+  },
+  "column_name_updated_msg": {
+    "message": "Nombre de la columna actualizado a"
+  },
+  "note_saved_msg": {
+    "message": "Nota guardada con éxito"
+  },
+  "note_deleted_msg": {
+    "message": "Nota eliminada con éxito"
+  },
+  "updated_msg": {
+    "message": "actualizado con éxito"
+  },
+  "quick_message_created_msg": {
+    "message": "Nuevo mensaje rápido creado con éxito"
+  },
+  "image_uploaded_mg": {
+    "message": "Imagen subida con éxito"
+  },
+  "message_sent_mg": {
+    "message": "Mensaje enviado con éxito"
+  },
+  "backup_restored_error_text": {
+    "message": "Error al restaurar el respaldo. Asegúrate de que el archivo sea un JSON válido."
+  },
+  "cannot_move_default_column_msg": {
+    "message": "La columna Predeterminada debe permanecer como la primera columna"
+  },
+  "already_exisit_in": {
+    "message": "ya existe en"
+  },
+  "cannot_move_to_default_column_msg": {
+    "message": "No se pueden mover perfiles a la columna Predeterminada"
+  },
+  "cannot_delete_default_column_msg": {
+    "message": "No tienes permiso para eliminar la columna Predeterminada"
+  },
+  "title_must_be_unique_msg": {
+    "message": "Ya existe un mensaje con este título. Por favor elige un título único."
+  },
+  "title_and_content_required_msg": {
+    "message": "Por favor proporciona tanto un título como el contenido del mensaje."
+  },
+  "not_allowed_to_send_msg": {
+    "message": "No tienes permiso para enviar mensajes a este chat"
+  },
+  "image_upload_failed_mg": {
+    "message": "Error al subir la imagen"
+  },
+  "create_text": {
+    "message": "Crear"
+  },
+  "select_language_text": {
+    "message": "Seleccionar idioma"
+  },
+  "language_changed_text": {
+    "message": "Idioma cambiado con éxito"
+  },
+  "reload_to_apply_changes": {
+    "message": "Recargar para aplicar los cambios"
+  },
+  "login_button_text": {
+    "message": "Iniciar sesión con Google"
+  },
+  "login_error_msg": {
+    "message": "Algo salió mal. Por favor, inténtalo de nuevo."
+  },
+  "loading_text": {
+    "message": "Cargando..."
+  },
+  "enter_bulk_message_placeholder": {
+    "message": "Ingresa tu mensaje aquí"
+  },
+  "bulk_sender_select_column": {
+    "message": "Seleccionar destinatarios"
+  },
+  "send_text": {
+    "message": "Enviar"
+  },
+  "bulk_wait_each_msg": {
+    "message": "Intervalo entre mensajes en segundos"
+  },
+  "bulk_branch_gap_msg": {
+    "message": "Intervalo entre ramas en segundos"
+  },
+  "bulk_branch_size_msg": {
+    "message": "Tamaño de la rama"
+  },
+  "free_user_contact_limit_more_than_3_msg": {
+    "message": "Necesitas obtener una suscripción Premium para más de 3 contactos"
+  },
+  "free_user_bot_limit_reached": {
+    "message": "Necesitas obtener una suscripción Premium para crear más de 1 bot"
+  },
+  "max_quick_messages_reached_msg": {
+    "message": "Necesitas obtener una suscripción Premium para crear más de 1 mensaje rápido"
+  },
+  "failed_to_update_kanban_updates": {
+    "message": "¡Error al actualizar el Kanban!"
+  },
+  "kanban_updates_available": {
+    "message": "¡El Kanban se ha actualizado con éxito!"
+  },
+  "checking_for_kanban_updates": {
+    "message": "Buscando nuevas actualizaciones..."
+  },
+  "empty_folder_text": {
+    "message": "¡Carpeta vacía!"
+  },
+  "login_title": {
+    "message": "Bienvenido a Flowsi CRM"
+  },
+  "login_description": {
+    "message": "Inicia sesión con tu cuenta de Google para disfrutar de nuestro plan gratuito"
+  },
+  "login_with_google": {
+    "message": "Iniciar sesión con Google"
+  },
+  "powered_by_msg": {
+    "message": "Desarrollado por Flowsi.com.br"
+  },
+  "folder_deleted_msg": {
+    "message": "La carpeta se ha eliminado correctamente."
+  },
+  "confirm_restore_backup_text": {
+    "message": "¿Estás seguro de que quieres restaurar este respaldo?"
+  },
+  "backup_created_success_text": {
+    "message": "Tu archivo de respaldo se ha generado correctamente."
+  },
+  "backup_creation_error_text": {
+    "message": "Ocurrió un error al crear el respaldo. Por favor, inténtalo de nuevo más tarde."
+  },
+  "account_info_text": {
+    "message": "Información de la cuenta"
+  },
+  "quick_message_title": {
+    "message": "Mensajes Rápidos"
+  },
+  "manage_chatbot_title": {
+    "message": "Gestionar Chatbots"
+  },
+  "bulk_messages_title": {
+    "message": "Mensajes Masivos"
+  },
+  "manage_account_title": {
+    "message": "Gestionar tu cuenta"
+  },
+  "help_center_title": {
+    "message": "Centro de Ayuda"
+  },
+  "get_pro_title": {
+    "message": "Obtener Suscripción Premium"
+  },
+  "get_pro_description": {
+    "message": "¡Desbloquea acceso ilimitado a todas las funciones y potencia tu experiencia de CRM de Instagram!"
+  },
+  "get_pro_feature_1": {
+    "message": "Contactos ilimitados en el CRM"
+  },
+  "get_pro_feature_2": {
+    "message": "Chatbots ilimitados"
+  },
+  "get_pro_feature_3": {
+    "message": "Mensajes Rápidos ilimitados"
+  },
+  "get_pro_feature_4": {
+    "message": "Soporte prioritario"
+  },
+  "subscription_download_backup_error_text": {
+    "message": "Necesitas obtener Premium para descargar tu respaldo."
+  },
+  "subscription_restore_backup_error_text": {
+    "message": "Necesitas obtener Premium para restaurar tu respaldo."
+  },
+  "upgrade_to_premium_text": {
+    "message": "Actualizar a Premium"
+  },
+  "script_name_required_msg": {
+    "message": "Se debe proporcionar un nombre para el script."
+  },
+  "script_content_required_msg": {
+    "message": "Debes agregar al menos un elemento"
+  },
+  "script_created_msg": {
+    "message": "Script creado exitosamente"
+  },
+  "gap_duration_required_msg": {
+    "message": "El intervalo del script debe ser de al menos 1 segundo."
+  },
+  "message_script_required_msg": {
+    "message": "Debes seleccionar un mensaje."
+  },
+  "create_script_text": {
+    "message": "Crear Script"
+  },
+  "script_select_message_text": {
+    "message": "Seleccionar una plantilla de mensaje"
+  },
+  "gap_duration_text": {
+    "message": "Agregar intervalo (en segundos)"
+  },
+  "wait_for_text": {
+    "message": "Esperar"
+  },
+  "send_message_text": {
+    "message": "Enviar mensaje"
+  },
+  "comment_bot_text": {
+    "message": "Bot de Comentarios"
+  },
+  "comment_bot_config_text": {
+    "message": "Configuración del Bot de Comentarios"
+  },
+  "enter_keyword_text": {
+    "message": "Escribe palabras clave... (Presiona enter para añadir)"
+  },
+  "no_keyword_found": {
+    "message": "¡No hay palabras clave! Ingresa tu primera palabra clave"
+  },
+  "please_add_at_least_one_keyword": {
+    "message": "Por favor, agrega al menos una palabra clave"
+  },
+  "create_folder_text": {
+    "message": "Crear Carpeta"
+  },
+  "script_name_text": {
+    "message": "Nombre del script"
+  },
+  "folder_name_text": {
+    "message": "Nombre de la carpeta"
+  },
+  "title_text": {
+    "message": "Título"
+  },
+  "content_text": {
+    "message": "Contenido"
+  },
+  "bulk_status_title": {
+    "message": "Estado de Mensajes Masivos"
+  },
+  "recipient_text": {
+    "message": "Destinatario"
+  },
+  "bulk_message_remain_text": {
+    "message": "Mensajes restantes"
+  },
+  "stop_text": {
+    "message": "Detener"
+  },
+  "add_text": {
+    "message": "Agregar"
+  },
+  "update_script_text": {
+    "message": "Actualizar Script"
+  },
+  "script_updated_msg": {
+    "message": "Script actualizado con éxito"
+  },
+  "bulk_message_suggesion": {
+    "message": "Por favor, no cambies de pestaña ni minimices Chrome"
+  },
+  "select_column_placeholder": {
+    "message": "Selecciona una columna"
+  },
+  "on_success_copy_to_column": {
+    "message": "Al enviar con éxito, agregar a"
+  },
+  "on_success_remove_column": {
+    "message": "Al enviar exitosamente, ¿eliminar la etiqueta actual?"
+  },
+  "text_message_text": {
+    "message": "Mensaje de texto"
+  },
+  "image_message_text": {
+    "message": "Mensaje de imagen"
+  },
+  "video_message_text": {
+    "message": "Mensaje de video"
+  },
+  "voice_message_text": {
+    "message": "Mensaje de voz"
+  },
+  "message_script_text": {
+    "message": "Script de mensaje"
+  },
+  "open_chat_text": {
+    "message": "Abrir Chat"
+  },
+  "notes_text": {
+    "message": "Notas"
+  },
+  "instagram_text": {
+    "message": "Instagram"
+  },
+  "kanban_crm_text": {
+    "message": "Kanban CRM"
+  },
+  "quick_messages_text": {
+    "message": "Mensajes Rápidos"
+  },
+  "chatbot_text": {
+    "message": "Chatbot"
+  },
+  "bulk_messages_text": {
+    "message": "Mensajes Masivos"
+  },
+  "theme_text": {
+    "message": "Tema"
+  },
+  "need_help_text": {
+    "message": "¿Necesitas Ayuda?"
+  },
+  "account_text": {
+    "message": "Cuenta"
+  },
+  "remove_text": {
+    "message": "Eliminar"
+  },
+  "edit_label_text": {
+    "message": "Editar Etiqueta"
+  },
+  "delete_label_text": {
+    "message": "Eliminar Etiqueta"
+  },
+  "create_label_text": {
+    "message": "Crear Etiqueta"
+  },
+  "zoom_in_text": {
+    "message": "Acercar"
+  },
+  "zoom_out_text": {
+    "message": "Alejar"
+  },
+  "to_column_text": {
+    "message": "A Columna"
+  },
+  "to_followers_text": {
+    "message": "A Seguidores"
+  },
+  "targeted_username_label": {
+    "message": "Nombre de usuario del influencer objetivo"
+  },
+  "target_keyword_text": {
+    "message": "Palabra clave objetivo"
+  },
+  "bulk_progress_title": {
+    "message": "Progreso de Mensajes Masivos"
+  },
+  "processed_text": {
+    "message": "Procesado"
+  },
+  "initializing_text": {
+    "message": "Inicializando"
+  },
+  "stop_and_return_text": {
+    "message": "Detener y Volver a Instagram"
+  },
+  "current_user_text": {
+    "message": "Usuario actual"
+  },
+  "branch_gap_wait_label": {
+    "message": "Esperando intervalo entre ramas (segundos)"
+  },
+  "each_gap_wait_label": {
+    "message": "Esperando intervalo entre cada mensaje (segundos)"
+  },
+  "sending_message_label": {
+    "message": "Enviando mensaje..."
+  },
+  "chats_sync_error": {
+    "message": "¡Ups! Algo salió mal al sincronizar tus chats. Lo intentaremos de nuevo la próxima vez."
+  },
+  "chats_sync_complete": {
+    "message": "¡Excelentes noticias! Tus chats se han sincronizado correctamente con nuestra extensión."
+  },
+  "chats_syncing": {
+    "message": "Sincronizando tus chats... Esto puede tardar unos minutos. Por favor, no recargues la página."
+  },
+  "load_more_text": {
+    "message": "Cargar más"
+  }
+}

@@ -4,8 +4,12 @@ const flowCount = document.querySelector("#flowCount");
 const popupFlows = document.querySelector(".popup-flows");
 const flowsTab = document.querySelector("#flowsTab");
 const extractTab = document.querySelector("#extractTab");
+const emailTab = document.querySelector("#emailTab");
+const instagramTab = document.querySelector("#instagramTab");
 const flowsPanel = document.querySelector("#flowsPanel");
 const extractPanel = document.querySelector("#extractPanel");
+const emailPanel = document.querySelector("#emailPanel");
+const instagramPanel = document.querySelector("#instagramPanel");
 const extractionSearch = document.querySelector("#extractionSearch");
 const extractionSourceList = document.querySelector("#extractionSourceList");
 const extractSelectAll = document.querySelector("#extractSelectAll");
@@ -43,13 +47,16 @@ function renderMasterButton() {
   enabled.removeAttribute("aria-busy");
   enabled.classList.remove("loading");
   enabled.setAttribute("aria-pressed", String(automationEnabled));
+  enabled.setAttribute("aria-expanded", String(automationEnabled));
   enabled.setAttribute(
     "aria-label",
-    automationEnabled ? "Desativar automações" : "Ativar automações"
+    automationEnabled ? "Desativar todos os fluxos" : "Ativar todos os fluxos"
   );
-  enabled.title = automationEnabled ? "Desativar automações" : "Ativar automações";
+  enabled.title = automationEnabled
+    ? "Desativar todos os fluxos"
+    : "Ativar todos os fluxos";
   enabled.classList.toggle("active", automationEnabled);
-  popupFlows.hidden = !automationEnabled;
+  popupFlows.classList.toggle("master-disabled", !automationEnabled);
 }
 
 function escapeHtml(value = "") {
@@ -134,15 +141,24 @@ function renderFlows() {
 }
 
 function setPopupTab(tab) {
-  activePopupTab = tab === "extract" ? "extract" : "flows";
+  activePopupTab = ["extract", "email", "instagram"].includes(tab) ? tab : "flows";
   const showingExtraction = activePopupTab === "extract";
+  const showingEmail = activePopupTab === "email";
+  const showingInstagram = activePopupTab === "instagram";
+  const showingFlows = activePopupTab === "flows";
 
-  flowsPanel.hidden = showingExtraction;
+  flowsPanel.hidden = !showingFlows;
   extractPanel.hidden = !showingExtraction;
-  flowsTab.classList.toggle("active", !showingExtraction);
+  emailPanel.hidden = !showingEmail;
+  instagramPanel.hidden = !showingInstagram;
+  flowsTab.classList.toggle("active", showingFlows);
   extractTab.classList.toggle("active", showingExtraction);
-  flowsTab.setAttribute("aria-selected", String(!showingExtraction));
+  emailTab.classList.toggle("active", showingEmail);
+  instagramTab.classList.toggle("active", showingInstagram);
+  flowsTab.setAttribute("aria-selected", String(showingFlows));
   extractTab.setAttribute("aria-selected", String(showingExtraction));
+  emailTab.setAttribute("aria-selected", String(showingEmail));
+  instagramTab.setAttribute("aria-selected", String(showingInstagram));
 
   if (showingExtraction && !extractionLoaded && !extractionBusy) {
     loadExtractionSources();
@@ -181,7 +197,7 @@ async function sendToWhatsApp(message) {
     return await chrome.tabs.sendMessage(tab.id, message);
   } catch {
     throw new Error(
-      "Atualize a aba do WhatsApp Web para carregar o extrator do WhatsFlow."
+      "Atualize a aba do WhatsApp Web para carregar o extrator do CRM Flow."
     );
   }
 }
@@ -387,7 +403,7 @@ async function runExtraction() {
     extractionResultCount.textContent =
       `${extractedContacts.length} contato(s) extraído(s)`;
     extractionResultDetails.textContent =
-      details.join(" • ") || "Arquivo pronto no padrão do WhatsFlow.";
+      details.join(" • ") || "Arquivo pronto no padrão do CRM Flow.";
     extractionResult.hidden = false;
     downloadExtraction.disabled = extractedContacts.length === 0;
     extractionStatus.textContent = response.cancelled
@@ -453,6 +469,8 @@ enabled.addEventListener("click", async () => {
 
 flowsTab.addEventListener("click", () => setPopupTab("flows"));
 extractTab.addEventListener("click", () => setPopupTab("extract"));
+emailTab.addEventListener("click", () => setPopupTab("email"));
+instagramTab.addEventListener("click", () => setPopupTab("instagram"));
 
 document.querySelectorAll("[data-extract-source]").forEach(button => {
   button.addEventListener("click", () => {
@@ -524,6 +542,19 @@ flowListPopup.addEventListener("change", async event => {
 
 document.querySelector("#openEditor").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
+});
+
+document.querySelector("#openInstagram").addEventListener("click", async () => {
+  const tabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
+  const instagram = tabs.sort((left, right) =>
+    Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0)
+  )[0];
+  if (instagram?.id) {
+    await chrome.tabs.update(instagram.id, { active: true });
+  } else {
+    await chrome.tabs.create({ url: "https://www.instagram.com/direct/inbox/", active: true });
+  }
+  window.close();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {

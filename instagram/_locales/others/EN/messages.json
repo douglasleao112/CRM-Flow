@@ -1,0 +1,476 @@
+{
+  "extension_name": {
+    "message": "Flowsi CRM for Instagram"
+  },
+  "extension_description": {
+    "message": "Flowsi is a CRM that allows you to organize your Instagram to increase your sales"
+  },
+  "first_column_title": {
+    "message": "All Chats"
+  },
+  "create_column": {
+    "message": "Create new column"
+  },
+  "column_name": {
+    "message": "Enter Column Name"
+  },
+  "create_column_button_text": {
+    "message": "Create"
+  },
+  "cancel_text": {
+    "message": "Cancel"
+  },
+  "delete_column": {
+    "message": "Are you sure you want to delete this column?"
+  },
+  "rename_column": {
+    "message": "Rename Tag: "
+  },
+  "update_text": {
+    "message": "Update"
+  },
+  "updated_column_name": {
+    "message": "Enter new column name"
+  },
+  "confirm_text": {
+    "message": "Confirm"
+  },
+  "edit_message": {
+    "message": "Edit Message"
+  },
+  "create_new_message": {
+    "message": "Create new message"
+  },
+  "create_message_text": {
+    "message": "Create Message"
+  },
+  "update_message_text": {
+    "message": "Update Message"
+  },
+  "existing_bots": {
+    "message": "Existing Bots"
+  },
+  "select_a_dm_template": {
+    "message": "Select a DM template"
+  },
+  "contact_us_text": {
+    "message": "Contact Us"
+  },
+  "join_us_text": {
+    "message": "Join us with your google account"
+  },
+  "general_settings_text": {
+    "message": "General Settings"
+  },
+  "download_backup_text": {
+    "message": "Download Backup"
+  },
+  "upload_backup_text": {
+    "message": "Upload Backup"
+  },
+  "add_label_text": {
+    "message": "Add to CRM"
+  },
+  "login_success_msg": {
+    "message": "Logged in successfully!"
+  },
+  "bot_saved_msg": {
+    "message": "Bot saved successfully"
+  },
+  "bot_deleted_msg": {
+    "message": "Bot deleted successfully"
+  },
+  "backup_restored_success_text": {
+    "message": "Backup restored successfully!"
+  },
+  "new_column_success_msg": {
+    "message": " New Column created successfully"
+  },
+  "profile_removed_success_msg": {
+    "message": "Profile removed successfully from this Column"
+  },
+  "column_deleted_success_msg": {
+    "message": "Column deleted successfully"
+  },
+  "column_name_updated_msg": {
+    "message": "Column name updated to "
+  },
+  "note_saved_msg": {
+    "message": "Note saved successfully"
+  },
+  "note_deleted_msg": {
+    "message": "Note deleted successfully"
+  },
+  "updated_msg": {
+    "message": " updated successfully"
+  },
+  "quick_message_created_msg": {
+    "message": "New quick message created successfully!"
+  },
+  "image_uploaded_mg": {
+    "message": "Image uploaded successfully"
+  },
+  "message_sent_mg": {
+    "message": "Message sent successfully"
+  },
+  "backup_restored_error_text": {
+    "message": "Error restoring backup. Please make sure the file is a valid JSON."
+  },
+  "cannot_move_default_column_msg": {
+    "message": "The Default column must remain as the first column"
+  },
+  "already_exisit_in": {
+    "message": "already exists in"
+  },
+  "cannot_move_to_default_column_msg": {
+    "message": "Cannot move profiles to Default column"
+  },
+  "cannot_delete_default_column_msg": {
+    "message": "You are not allowed to delete the default column"
+  },
+  "title_must_be_unique_msg": {
+    "message": "A message with this title already exists. Please choose a unique title."
+  },
+  "title_and_content_required_msg": {
+    "message": "Please provide both a title and content for the message."
+  },
+  "not_allowed_to_send_msg": {
+    "message": "You are not allowed to send messages to this chat"
+  },
+  "image_upload_failed_mg": {
+    "message": "Error uploading image"
+  },
+  "create_text": {
+    "message": "Create"
+  },
+  "select_language_text": {
+    "message": "Select language"
+  },
+  "language_changed_text": {
+    "message": "Language changed successfully"
+  },
+  "reload_to_apply_changes": {
+    "message": "Reload to apply changes"
+  },
+  "login_button_text": {
+    "message": "Login with Google"
+  },
+  "login_error_msg": {
+    "message": "Something went wrong. Please try again."
+  },
+  "loading_text": {
+    "message": "Loading..."
+  },
+  "enter_bulk_message_placeholder": {
+    "message": "Enter your message here"
+  },
+  "bulk_sender_select_column": {
+    "message": "Select recipients"
+  },
+  "send_text": {
+    "message": "Send"
+  },
+  "bulk_wait_each_msg": {
+    "message": "Gap between messages in seconds"
+  },
+  "bulk_branch_gap_msg": {
+    "message": "Branch Gap in seconds"
+  },
+  "bulk_branch_size_msg": {
+    "message": "Branch size"
+  },
+  "free_user_contact_limit_more_than_3_msg": {
+    "message": "You need to get Premium subscription to add more than 3 contacts"
+  },
+  "free_user_bot_limit_reached": {
+    "message": "You need to get Premium subscription to create more than 1 bot"
+  },
+  "max_quick_messages_reached_msg": {
+    "message": "You need to get Premium subscription to create more than 1 quick message"
+  },
+  "failed_to_update_kanban_updates": {
+    "message": "Failed to update the Kanban!"
+  },
+  "kanban_updates_available": {
+    "message": "Kanban has been updated successfully!"
+  },
+  "checking_for_kanban_updates": {
+    "message": "Checking for new updates..."
+  },
+  "empty_folder_text": {
+    "message": "  Empty folder!"
+  },
+  "login_title": {
+    "message": "Welcome to Flowsi CRM"
+  },
+  "login_description": {
+    "message": "Login with your Google account to enjoy our free plan!"
+  },
+  "login_with_google": {
+    "message": "Login with Google"
+  },
+  "powered_by_msg": {
+    "message": "Powered by Flowsi.com.br"
+  },
+  "folder_deleted_msg": {
+    "message": "Folder has been deleted successfully."
+  },
+  "confirm_restore_backup_text": {
+    "message": "Are you sure you want to restore this backup?"
+  },
+  "backup_created_success_text": {
+    "message": "Your backup file has been generated succesfully."
+  },
+  "backup_creation_error_text": {
+    "message": "Something Went wrong while creating the backup. Please try again later."
+  },
+  "account_info_text": {
+    "message": "Account Information"
+  },
+  "quick_message_title": {
+    "message": "Quick Messages"
+  },
+  "manage_chatbot_title": {
+    "message": "Manage Chatbots"
+  },
+  "bulk_messages_title": {
+    "message": "Bulk Messages"
+  },
+  "manage_account_title": {
+    "message": "Manage your account"
+  },
+  "help_center_title": {
+    "message": "Help Center"
+  },
+  "get_pro_title": {
+    "message": "Get Premium Subscription"
+  },
+  "get_pro_description": {
+    "message": "Unlock unlimited access to all features and supercharge your Instagram CRM experience!"
+  },
+  "get_pro_feature_1": {
+    "message": "Unlimited contacts in CRM"
+  },
+  "get_pro_feature_2": {
+    "message": "Unlimited chatbots"
+  },
+  "get_pro_feature_3": {
+    "message": "Unlimited Quick Messages"
+  },
+  "get_pro_feature_4": {
+    "message": "Priority support"
+  },
+  "subscription_download_backup_error_text": {
+    "message": "You need to get Premium to download your backup."
+  },
+  "subscription_restore_backup_error_text": {
+    "message": "You need to get Premium to restore your backup."
+  },
+  "upgrade_to_premium_text": {
+    "message": "Upgrade to Premium"
+  },
+  "script_name_required_msg": {
+    "message": "Script name must be provided."
+  },
+  "script_content_required_msg": {
+    "message": "You must add at least one item"
+  },
+  "script_created_msg": {
+    "message": "Script created succesfully"
+  },
+  "gap_duration_required_msg": {
+    "message": "Script gap must be at least 1 second."
+  },
+  "message_script_required_msg": {
+    "message": "You must need to select a message."
+  },
+  "create_script_text": {
+    "message": "Create Script"
+  },
+  "script_select_message_text": {
+    "message": "Select a message template"
+  },
+  "gap_duration_text": {
+    "message": "Add gap (in seconds)"
+  },
+  "wait_for_text": {
+    "message": "Wait for"
+  },
+  "send_message_text": {
+    "message": "Send message"
+  },
+  "comment_bot_text": {
+    "message": "Comment Bot"
+  },
+  "comment_bot_config_text": {
+    "message": "Comment Bot Configuration"
+  },
+  "enter_keyword_text": {
+    "message": "Type keywords... (Click enter to add)"
+  },
+  "no_keyword_found": {
+    "message": "No keyword! Enter your first keyword"
+  },
+  "please_add_at_least_one_keyword": {
+    "message": "Please add atleast one keyword"
+  },
+  "create_folder_text": {
+    "message": "Create Folder"
+  },
+  "script_name_text": {
+    "message": "Script name"
+  },
+  "folder_name_text": {
+    "message": "Folder name"
+  },
+  "title_text": {
+    "message": "Title"
+  },
+  "content_text": {
+    "message": "Content"
+  },
+  "bulk_status_title": {
+    "message": "Bulk Messaging Status"
+  },
+  "recipient_text": {
+    "message": "Recipient"
+  },
+  "bulk_message_remain_text": {
+    "message": "Messages remaining"
+  },
+  "stop_text": {
+    "message": "Stop"
+  },
+  "add_text": {
+    "message": "Add"
+  },
+  "update_script_text": {
+    "message": "Update Script"
+  },
+  "script_updated_msg": {
+    "message": "Script updated successfully"
+  },
+  "bulk_message_suggesion": {
+    "message": "Please don't switch tabs or minimize Chrome"
+  },
+  "select_column_placeholder": {
+    "message": "Select a column"
+  },
+  "on_success_copy_to_column": {
+    "message": "Upon successful sending, add to"
+  },
+  "on_success_remove_column": {
+    "message": "When submitting successfully, remove current label?"
+  },
+  "text_message_text": {
+    "message": "Text Message"
+  },
+  "image_message_text": {
+    "message": "Image Message"
+  },
+  "video_message_text": {
+    "message": "Video Message"
+  },
+  "voice_message_text": {
+    "message": "Voice Message"
+  },
+  "message_script_text": {
+    "message": "Message Script"
+  },
+  "open_chat_text": {
+    "message": "Open Chat"
+  },
+  "notes_text": {
+    "message": "Notes"
+  },
+  "instagram_text": {
+    "message": "Instagram"
+  },
+  "kanban_crm_text": {
+    "message": "Kanban CRM"
+  },
+  "quick_messages_text": {
+    "message": "Quick Messages"
+  },
+  "chatbot_text": {
+    "message": "Chatbot"
+  },
+  "bulk_messages_text": {
+    "message": "Bulk Messages"
+  },
+  "theme_text": {
+    "message": "Theme"
+  },
+  "need_help_text": {
+    "message": "Need Help?"
+  },
+  "account_text": {
+    "message": "Account"
+  },
+  "remove_text": {
+    "message": "Remove"
+  },
+  "edit_label_text": {
+    "message": "Edit Label"
+  },
+  "delete_label_text": {
+    "message": "Delete Label"
+  },
+  "create_label_text": {
+    "message": "Create Label"
+  },
+  "zoom_in_text": {
+    "message": "Zoom in"
+  },
+  "zoom_out_text": {
+    "message": "Zoom out"
+  },
+  "to_column_text": {
+    "message": "To Column"
+  },
+  "to_followers_text": {
+    "message": "To Followers"
+  },
+  "targeted_username_label": {
+    "message": "Targeted Influencer's Username"
+  },
+  "target_keyword_text": {
+    "message": "Target keyword"
+  },
+  "bulk_progress_title": {
+    "message": "Bulk Messaging Progress"
+  },
+  "processed_text": {
+    "message": "Processed"
+  },
+  "initializing_text": {
+    "message": "Initializing"
+  },
+  "stop_and_return_text": {
+    "message": "Stop and Return to Instagram"
+  },
+  "current_user_text": {
+    "message": "Current user"
+  },
+  "branch_gap_wait_label": {
+    "message": "Waiting for branch gap (seconds)"
+  },
+  "each_gap_wait_label": {
+    "message": "Waiting for each message gap (seconds)"
+  },
+  "sending_message_label": {
+    "message": "Sending message..."
+  },
+  "chats_sync_error": {
+    "message": "Oops! Something went wrong while syncing your chats. We'll try again next time."
+  },
+  "chats_sync_complete": {
+    "message": "Great news! Your chats have been successfully synced with our extension."
+  },
+  "chats_syncing": {
+    "message": "Syncing your chats... This may take a few minutes. Please don't reload the page."
+  },
+  "load_more_text": {
+    "message": "Load more"
+  }
+}

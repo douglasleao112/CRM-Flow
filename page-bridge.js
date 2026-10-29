@@ -297,7 +297,7 @@
         authenticated = !disconnectedStates.has(streamState);
         whatsappOnline = !disconnectedStates.has(streamState);
       } else if (!authenticated && wppAuthenticationKnown) {
-        // Se o próprio namespace do WhatsFlow informou logout, a simples
+        // Se o próprio namespace do CRM Flow informou logout, a simples
         // presença do Store nativo não deve transformar isso em "conectado".
         authenticated = false;
         whatsappOnline = false;
@@ -522,7 +522,7 @@
       const available = await waitForEngine();
       if (!available) {
         emit("BRIDGE_ERROR", {
-          error: "O motor do WhatsFlow ainda está carregando no WhatsApp.",
+          error: "O motor do CRM Flow ainda está carregando no WhatsApp.",
           stage: "wa-js",
           capabilities: getEngineCapabilities()
         });
@@ -1487,7 +1487,7 @@
         }
       });
     } catch (error) {
-      console.error("[WA Flow] Falha ao enviar mídia:", error);
+      console.error("[CRM Flow] Falha ao enviar mídia:", error);
 
       emit("COMMAND_RESULT", {
         requestId,

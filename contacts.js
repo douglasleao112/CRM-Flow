@@ -1445,7 +1445,7 @@
       );
       const column = name => headers.indexOf(normalizeHeader(name));
       if (column("ID") < 0 || column("Nome") < 0 || column("DestinatariosJSON") < 0) {
-        throw new Error("Este CSV não corresponde a um histórico do WhatsFlow.");
+        throw new Error("Este CSV não corresponde a um histórico do CRM Flow.");
       }
       const existingIds = new Set(campaigns.map(item => String(item.id)));
       const imported = [];
@@ -2392,7 +2392,7 @@
     } catch (error) {
       const message = String(error?.message || error);
       feedback.textContent = /Extension context invalidated/i.test(message)
-        ? "A extensão foi recarregada. Feche esta página, abra novamente o WhatsFlow e atualize o WhatsApp Web."
+        ? "A extensão foi recarregada. Feche esta página, abra novamente o CRM Flow e atualize o WhatsApp Web."
         : `Erro: ${message}`;
     } finally {
       if (!campaignStarted) bulkRequestPending = false;

@@ -1,83 +1,57 @@
 {
   "manifest_version": 3,
-  "name": "WhatsApp Flow Builder v2.3",
-  "version": "2.16.45",
-  "description": "Editor visual e engine de automações para WhatsApp Web, com suporte a fluxos grandes e mídias em Base64.",
-  "permissions": [
-    "storage",
-    "alarms",
-    "tabs",
-    "scripting",
-    "declarativeNetRequestWithHostAccess",
-    "unlimitedStorage"
-  ],
-  "host_permissions": [
-    "https://web.whatsapp.com/*",
-    "https://github.com/*",
-    "https://objects.githubusercontent.com/*",
-    "https://unpkg.com/*"
-  ],
+  "name": "CRM Flow",
+  "default_locale": "pt_BR",
+  "version": "1.0.0",
+  "description": "CRM unificado para WhatsApp, Gmail e Instagram.",
+  "permissions": ["storage", "alarms", "tabs", "scripting", "cookies", "activeTab", "declarativeNetRequest", "declarativeNetRequestWithHostAccess", "unlimitedStorage"],
+  "host_permissions": ["https://web.whatsapp.com/*", "https://mail.google.com/*", "https://www.instagram.com/*", "https://i.instagram.com/*", "https://github.com/*", "https://objects.githubusercontent.com/*", "https://unpkg.com/*"],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "WhatsApp Flow Builder",
-    "default_icon": {
-      "16": "icons/icon-16.png",
-      "32": "icons/icon-32.png",
-      "48": "icons/icon-48.png",
-      "128": "icons/icon-128.png"
-    }
+    "default_title": "CRM Flow",
+    "default_icon": {"16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png"}
   },
   "options_page": "editor.html",
   "content_scripts": [
     {
-      "matches": [
-        "https://web.whatsapp.com/*"
-      ],
-      "js": [
-        "audio-converter.js",
-        "content.js",
-        "whatsapp-kanban.js",
-        "trigger-matcher.js",
-        "engine.js"
-      ],
-      "css": [
-        "chat-control.css",
-        "whatsapp-kanban.css"
-      ],
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["audio-converter.js", "content.js", "whatsapp-kanban.js", "trigger-matcher.js", "engine.js"],
+      "css": ["chat-control.css", "whatsapp-kanban.css"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["gmail-content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["instagram/src/pages/content/contact-scraper-main.js"],
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "css": ["instagram/assets/css/contentStyle17809383386.chunk.css"],
+      "js": ["instagram/src/pages/content/index.js", "instagram/src/pages/content/follows-you-recovery.js", "instagram/src/pages/content/contact-loader.js"]
     }
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
+  "background": {"service_worker": "crm-background.js", "type": "module"},
   "declarative_net_request": {
     "rule_resources": [
-      {
-        "id": "ruleset_1",
-        "enabled": true,
-        "path": "rules.json"
-      }
+      {"id": "whatsapp_rules", "enabled": true, "path": "rules.json"},
+      {"id": "instagram_rules", "enabled": true, "path": "instagram/rules/rule.json"}
     ]
   },
   "web_accessible_resources": [
     {
-      "resources": [
-        "page-bridge.js",
-        "vendor-loader.js",
-        "wppconnect-wa.js"
-      ],
-      "matches": [
-        "https://web.whatsapp.com/*"
-      ]
+      "resources": ["page-bridge.js", "vendor-loader.js", "wppconnect-wa.js"],
+      "matches": ["https://web.whatsapp.com/*"]
+    },
+    {
+      "resources": ["instagram/assets/js/*.js", "instagram/assets/css/*.css", "icon.png", "ig-logo.png", "_locales/others/*"],
+      "matches": ["https://www.instagram.com/*"]
     }
   ],
-  "icons": {
-    "16": "icons/icon-16.png",
-    "32": "icons/icon-32.png",
-    "48": "icons/icon-48.png",
-    "128": "icons/icon-128.png"
-  },
-  "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data:;"
-  }
+  "icons": {"16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data:;"}
 }

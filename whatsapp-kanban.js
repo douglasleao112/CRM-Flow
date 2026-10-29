@@ -43,7 +43,7 @@
   let labelMutationRevision = 0;
   let labelMutationsInFlight = 0;
   let labelResyncTimer = null;
-  let zapFlowResizeHandler = null;
+  let mktFlowResizeHandler = null;
 
   const scheduleLabelResync = (delay = 800) => {
     if (labelResyncTimer) clearTimeout(labelResyncTimer);
@@ -389,7 +389,7 @@
     } catch (error) {
       if (destinationAdded || sourceRemoved) {
         try { await save(); } catch (saveError) {
-          console.error("[WA Flow] Não foi possível salvar a troca de etiquetas no Kanban.", saveError);
+          console.error("[CRM Flow] Não foi possível salvar a troca de etiquetas no Kanban.", saveError);
         }
       }
       render();
@@ -1027,14 +1027,14 @@
     refreshFailures();
   }
 
-  function mountZapFlow(kanbanButton) {
+  function mountMktFlow(kanbanButton) {
     if (document.querySelector("#wf-zap-flow-button")) return;
     const button = document.createElement("button");
     button.id = "wf-zap-flow-button";
     button.type = "button";
-    button.title = "Zap Flow";
-    button.setAttribute("aria-label", "Abrir Zap Flow");
-    button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13.5 2.5-9 11h6l-1 8 10-12h-6l0-7Z"></path></svg><span>Zap Flow</span>`;
+    button.title = "CRM Flow";
+    button.setAttribute("aria-label", "Abrir CRM Flow");
+    button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13.5 2.5-9 11h6l-1 8 10-12h-6l0-7Z"></path></svg><span>CRM Flow</span>`;
     const failuresButton = document.querySelector("#wf-failures-button");
     (failuresButton || kanbanButton).before(button);
 
@@ -1048,17 +1048,17 @@
     };
     requestAnimationFrame(position);
     setTimeout(position, 500);
-    if (zapFlowResizeHandler) window.removeEventListener("resize", zapFlowResizeHandler);
-    zapFlowResizeHandler = position;
-    window.addEventListener("resize", zapFlowResizeHandler);
+    if (mktFlowResizeHandler) window.removeEventListener("resize", mktFlowResizeHandler);
+    mktFlowResizeHandler = position;
+    window.addEventListener("resize", mktFlowResizeHandler);
 
     button.onclick = async () => {
       button.disabled = true;
       try {
         await chrome.runtime.sendMessage({ type: "WF_OPEN_POPUP" });
       } catch (error) {
-        console.error("[WA Flow] Não foi possível abrir o Zap Flow.", error);
-        alert("Não foi possível abrir o Zap Flow. Recarregue a extensão e tente novamente.");
+        console.error("[CRM Flow] Não foi possível abrir o CRM Flow.", error);
+        alert("Não foi possível abrir o CRM Flow. Recarregue a extensão e tente novamente.");
       } finally {
         button.disabled = false;
       }
@@ -1069,7 +1069,7 @@
     if (!document.body) return;
     const existingKanbanButton = document.querySelector("#wf-kanban-button");
     if (existingKanbanButton) {
-      mountZapFlow(existingKanbanButton);
+      mountMktFlow(existingKanbanButton);
       return;
     }
     // Wait for WhatsApp's conversation/sidebar shell so the Kanban shortcut
@@ -1083,7 +1083,7 @@
     button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M8 8v8M12 8v5M16 8v7"></path></svg><span>Kanban</span>`;
     document.body.appendChild(button);
     mountFailures(button);
-    mountZapFlow(button);
+    mountMktFlow(button);
 
     const panel = document.createElement("section");
     panel.id = "wf-kanban-panel";
@@ -1890,7 +1890,7 @@
       try {
         await save();
       } catch (error) {
-        console.error("[WA Flow] A etiqueta foi removida, mas o Kanban não salvou o novo estado.", error);
+        console.error("[CRM Flow] A etiqueta foi removida, mas o Kanban não salvou o novo estado.", error);
         alert("A etiqueta foi removida no WhatsApp, mas não foi possível salvar o Kanban. Clique em Sincronizar.");
       }
       if (confirmedChatIds.length < chatIds.length) {
@@ -1899,7 +1899,7 @@
     } catch (error) {
       pendingLabelCardRemoval = null;
       try { render(); } catch (renderError) {
-        console.error("[WA Flow] Não foi possível restaurar o card no Kanban.", renderError);
+        console.error("[CRM Flow] Não foi possível restaurar o card no Kanban.", renderError);
       }
       alert(error?.message || "Não foi possível remover a etiqueta deste contato no WhatsApp.");
     } finally {

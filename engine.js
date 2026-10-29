@@ -247,13 +247,13 @@
       try {
         failure = await recordFlowFailure({ ...options, activeFlow: snapshot });
       } catch (storageError) {
-        console.error("[WA Flow Failure Ledger]", storageError);
+        console.error("[CRM Flow Failure Ledger]", storageError);
       }
     }
     try {
       await clearFailedActiveFlow(options.chatId, snapshot);
     } catch (runtimeError) {
-      console.error("[WA Flow Failure Cleanup]", runtimeError);
+      console.error("[CRM Flow Failure Cleanup]", runtimeError);
     }
     return { failure, failedIndex, activeFlow: snapshot };
   }
@@ -1298,7 +1298,7 @@
           await trackCampaignMessage(chatId, mediaResult);
         } catch (error) {
           console.error(
-            `[WA Flow] Mídia do bloco ${index + 1} não foi enviada:`,
+            `[CRM Flow] Mídia do bloco ${index + 1} não foi enviada:`,
             error
           );
           updateBadge(`mídia não enviada`, "error");
@@ -1524,7 +1524,7 @@
         saveRuntime().catch(() => {});
       }
       console.info(
-        "[WA Flow] Captura duplicada ignorada",
+        "[CRM Flow] Captura duplicada ignorada",
         String(message?.id || ""),
         String(message?.source || "native")
       );
@@ -1543,7 +1543,7 @@
           message,
           error
         });
-        console.error("[WA Flow Engine v2]", error);
+        console.error("[CRM Flow Engine v2]", error);
         updateBadge(`erro: ${error.message}`, "error");
       })
       .finally(() => {
@@ -1619,7 +1619,7 @@
           startIndex: nextIndex,
           error
         });
-        console.error("[WA Flow Timeout v2]", error);
+        console.error("[CRM Flow Timeout v2]", error);
         updateBadge(`erro no tempo: ${error.message}`, "error");
       })
       .finally(() => {
@@ -1779,7 +1779,7 @@
 
   window.addEventListener("WF_MESSAGE_ACK", event => {
     handleCampaignMessageAck(event.detail || {}).catch(error => {
-      console.error("[WA Flow Campaign ACK]", error);
+      console.error("[CRM Flow Campaign ACK]", error);
     });
   });
 
@@ -2059,7 +2059,7 @@
         recipient.state = "sent";
         delete recipient.error;
       } catch (error) {
-        console.error("[WA Flow Bulk v2]", phone, error);
+        console.error("[CRM Flow Bulk v2]", phone, error);
         const pausedByControl = error?.code === "WF_CAMPAIGN_PAUSED";
         const negativeAckFailure =
           error?.code === "WF_NEGATIVE_ACK" ||
@@ -2365,7 +2365,7 @@
     stateReady
       .then(() => handleBulkControl(event.detail || {}))
       .catch(error => {
-        console.error("[WA Flow Bulk Control]", error);
+        console.error("[CRM Flow Bulk Control]", error);
         emitBulkControlResult(event.detail?.requestId, {
           ok: false,
           error: error?.message || String(error)
@@ -2497,7 +2497,7 @@
             replyText: String(detail.replyText || flowContext.body || ""),
             error
           });
-          console.error("[WA Flow Manual Advance]", error);
+          console.error("[CRM Flow Manual Advance]", error);
           updateBadge(`erro ao avançar: ${error.message}`, "error");
           emitChatControlResult(requestId, {
             ok: false,
@@ -2569,7 +2569,7 @@
             replyText: String(detail.replyText || flowContext.body || ""),
             error
           });
-          console.error("[WA Flow Manual v2]", error);
+          console.error("[CRM Flow Manual v2]", error);
           updateBadge(`erro no envio manual: ${error.message}`, "error");
           emitChatControlResult(requestId, {
             ok: false,
@@ -2820,13 +2820,13 @@
   setInterval(() => {
     timeoutSweep = timeoutSweep
       .then(processTimeouts)
-      .catch(error => console.error("[WA Flow Timeout Sweep]", error));
+      .catch(error => console.error("[CRM Flow Timeout Sweep]", error));
   }, 1000);
   setInterval(() => {
     campaignConnectionSweep = campaignConnectionSweep
       .then(pauseRunningCampaignIfDisconnected)
       .then(resumeRecoverableCampaignsIfConnected)
-      .catch(error => console.error("[WA Flow Campaign Connection]", error));
+      .catch(error => console.error("[CRM Flow Campaign Connection]", error));
   }, 2000);
   setInterval(refreshCampaignReceipts, 5000);
 })();

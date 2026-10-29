@@ -14,16 +14,16 @@
     retryTimer: null
   };
   window.__WF_VENDOR_LOADER__ = state;
-  window.WPPConfig = { deviceName: "WhatsApp Flow Builder", disableGoogleAnalytics: true };
+  window.WPPConfig = { deviceName: "CRM Flow", disableGoogleAnalytics: true };
   const loaderUrl = document.currentScript?.src || "";
 
   function announceReady() {
-    console.info("[WhatsFlow] WA-JS pronto", window.WFWPP?.version);
+    console.info("[CRM Flow] WA-JS pronto", window.WFWPP?.version);
     window.postMessage({ source: "WF_PAGE", type: "VENDOR_LOADED",
       version: window.WFWPP?.version || "" }, "*");
   }
   function reportWaiting(message, retryDelay = 5000) {
-    console.warn("[WhatsFlow] Falha de inicialização:", message);
+    console.warn("[CRM Flow] Falha de inicialização:", message);
     state.state = "waiting";
     state.error = message;
     window.postMessage({ source: "WF_PAGE", type: "BRIDGE_ERROR", stage: "vendor",
@@ -72,7 +72,7 @@
       // Never execute the bundle again after an initialization failure.
       // Retrying it installs duplicate listeners and does not repair module mappings.
       if (!window.WFWPP) {
-        reportWaiting("O WA-JS carregou sem criar o motor do WhatsFlow.", 10000);
+        reportWaiting("O WA-JS carregou sem criar o motor do CRM Flow.", 10000);
         return;
       }
       waitUntilReady();

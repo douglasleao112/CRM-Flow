@@ -1,0 +1,77 @@
+{
+  "action": {
+    "default_icon": "icon.png",
+    "default_popup": "src/pages/popup/index.html"
+  },
+  "background": {
+    "service_worker": "src/pages/background/index.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "src/pages/content/contact-scraper-main.js"
+      ],
+      "matches": [
+        "https://www.instagram.com/*"
+      ],
+      "world": "MAIN"
+    },
+    {
+      "css": [
+        "assets/css/contentStyle17809383386.chunk.css"
+      ],
+      "js": [
+        "src/pages/content/index.js",
+        "src/pages/content/contact-loader.js"
+      ],
+      "matches": [
+        "https://www.instagram.com/*"
+      ]
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "enabled": true,
+        "id": "ruleset_1",
+        "path": "rules/rule.json"
+      }
+    ]
+  },
+  "default_locale": "pt_BR",
+  "description": "__MSG_extension_description__",
+  "host_permissions": [
+    "*://*.instagram.com/*"
+  ],
+  "icons": {
+    "128": "icon.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtIVd/YKOdJU0bqL0L4gJtvCPayffeCnVMMkvhw1NauXDR9z1Vt3qaW3DC3NMAKrQQKax33NVxO6mHCPBsEmYbFaj+q1klF5psXLqXXvVpa4wkxCGLEnm6439M5/RK+TdiYYBRUdeHdycXuRaW3aGqq/QqVcQ430knHI1Fs5dCVLC5GmcMcVrw58cynKo/ZHGZWqYaeYzZSk4X2MLtedgy85o5XSABj2MngQyau6kWThCyeSv2MGLdSKE8yAEgNOBAAJGumm/ULnDGEaZxOd2PXAhTKNOJoE+HoRKNE6LzwepmWJgT7pJs8SlSyy/LlXNAOaNnSm05A7FdDyKH6TXbQIDAQAB",
+  "manifest_version": 3,
+  "name": "__MSG_extension_name__",
+  "permissions": [
+    "storage",
+    "cookies",
+    "tabs",
+    "alarms",
+    "declarativeNetRequest",
+    "activeTab"
+  ],
+  "update_url": "https://clients2.google.com/service/update2/crx",
+  "version": "2026.6.174",
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "https://www.instagram.com/*"
+      ],
+      "resources": [
+        "assets/js/*.js",
+        "assets/css/*.css",
+        "icon.png",
+        "ig-logo.png",
+        "_locales/others/*"
+      ]
+    }
+  ]
+}

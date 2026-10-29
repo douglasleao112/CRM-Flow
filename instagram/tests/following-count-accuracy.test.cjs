@@ -1,0 +1,43 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const root = path.join(__dirname, "..");
+const content = fs.readFileSync(path.join(root, "src", "pages", "content", "index.js"), "utf8");
+const mainWorld = fs.readFileSync(path.join(root, "src", "pages", "content", "contact-scraper-main.js"), "utf8");
+const background = fs.readFileSync(path.join(root, "src", "pages", "background", "index.js"), "utf8");
+const bundle = fs.readFileSync(path.join(root, "assets", "js", "index.e4b3aa7a.js"), "utf8");
+
+assert.match(content, /Math\.max\(0, Math\.trunc\(count\)\)\.toLocaleString\("pt-BR"\)/);
+assert.match(content, /followingFetchedAt = new Map\(\)/);
+assert.match(content, /followingFetchedAt\.get\(username\)[\s\S]{0,80}< 60000/);
+assert.match(content, /O Instagram retornou outro perfil/);
+assert.match(content, /setTimeout\(\(\) => controller\.abort\(\), 3500\)/);
+assert.match(content, /applyFollowingToNotebook\(panel, savedCount\)/);
+assert.match(content, /probeProfileBehindOverlay\(username\)\.then\(result => result\.following\)/);
+assert.match(content, /refreshedCount === 0 && Number\.isFinite\(confirmedCount\)/);
+assert.match(content, /followingCache\.get\(username\),\s*savedCount,\s*immediateCount/);
+assert.match(content, /!Number\.isFinite\(count\) \|\| count <= 0/);
+assert.match(content, /Number\.isFinite\(saved\) && saved > 0/);
+assert.match(content, /showFollowingLoadingInNotebook\(panel\)/);
+assert.match(content, /followingRetryTimers = new Map\(\)/);
+assert.match(content, /followingFetchedAt\.delete\(username\)/);
+assert.match(content, /syncFollowingCount\(username, visiblePanel\)/);
+assert.match(content, /currentValue !== "0"/);
+assert.match(mainWorld, /returnedUsername !== normalize\(username\)/);
+assert.match(mainWorld, /resolveProfileIdBySearch/);
+assert.match(mainWorld, /web\/search\/topsearch/);
+assert.match(mainWorld, /findExactUser/);
+assert.match(background, /returnedUsername === normalizedUsername/);
+assert.match(background, /resolveProfileIdBySearch/);
+assert.match(background, /web\/search\/topsearch/);
+assert.match(background, /findExactUser/);
+assert.match(background, /result\.value\.count > 0/);
+assert.match(background, /multiplier === 1 \? numericText\.replace\(\/\[\.,\]\/g, ""\)/);
+assert.match(bundle, /flowsiNotebookFetchedData_20261028\.id \|\|[\s\S]{0,120}flowsiNotebookRawProfile_20261028\.userId/);
+assert.match(bundle, /c\.edge_follow\.count !== null/);
+assert.doesNotMatch(bundle, /flowsiNotebookFetchedProfile_20261028\.following\) \|\|\s*0/);
+assert.match(bundle, /Number\(flowsiNotebookRawProfile_20261028\.edge_follow\?\.count\) > 0/);
+assert.match(bundle, /: "…"/);
+
+console.log("following-count-accuracy: 31 assertions passed");

@@ -1,0 +1,41 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "origin",
+          "operation": "set",
+          "value": "https://www.instagram.com"
+        },
+        {
+          "header": "user-agent",
+          "operation": "set",
+          "value": "Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1 Instagram 72.0.0.21.98"
+        },
+        { "header": "sec-ch-ua-mobile", "operation": "set", "value": "?1" },
+        { "header": "sec-ch-ua-platform", "operation": "set", "value": "iOS" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "https://i.instagram.com/api/v1/direct_v2/inbox/?persistentBadging=true&use_unified_inbox=true"
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "origin",
+          "operation": "set",
+          "value": "https://www.instagram.com"
+        }
+      ]
+    },
+    "condition": { "urlFilter": "*.instagram.com" }
+  }
+]

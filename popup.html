@@ -3,22 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>WhatsApp Flow Builder</title>
+  <title>CRM Flow</title>
   <link rel="icon" type="image/png" href="icons/icon-32.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body class="popup">
   <main>
     <div class="popup-title-row">
-      <h1>WhatsFlow</h1>
-      <button id="enabled" class="popup-master-switch loading" type="button"
-        aria-pressed="false" aria-busy="true" aria-label="Carregando automações" disabled>
-        <span class="popup-master-track" aria-hidden="true">
-          <span class="popup-master-thumb"></span>
-        </span>
-      </button>
+      <h1>CRM Flow</h1>
     </div>
-    <nav class="popup-tabs" role="tablist" aria-label="Recursos do WhatsFlow">
+    <nav class="popup-tabs" role="tablist" aria-label="Recursos do CRM Flow">
       <button
         id="flowsTab"
         class="popup-tab active"
@@ -34,20 +28,44 @@
         role="tab"
         aria-selected="false"
         aria-controls="extractPanel"
-      >Extrair números</button>
+      >Extrair</button>
+      <button
+        id="emailTab"
+        class="popup-tab"
+        type="button"
+        role="tab"
+        aria-selected="false"
+        aria-controls="emailPanel"
+      >Email</button>
+      <button
+        id="instagramTab"
+        class="popup-tab"
+        type="button"
+        role="tab"
+        aria-selected="false"
+        aria-controls="instagramPanel"
+      >Instagram</button>
     </nav>
 
     <div id="flowsPanel" class="popup-panel" role="tabpanel" aria-labelledby="flowsTab">
-      <section class="popup-flows">
-        <div class="popup-flows-head">
-          <strong>Fluxos</strong>
+      <div class="popup-flows-head">
+        <strong>Fluxo de WhatsApp</strong>
+        <div class="popup-flows-head-actions">
           <span id="flowCount" class="flow-count">0</span>
+          <button id="enabled" class="popup-master-switch loading" type="button"
+            aria-pressed="false" aria-busy="true" aria-label="Carregando fluxos" disabled>
+            <span class="popup-master-track" aria-hidden="true">
+              <span class="popup-master-thumb"></span>
+            </span>
+          </button>
         </div>
+      </div>
+      <section class="popup-flows">
         <div id="flowListPopup" class="popup-flow-list">
           <div class="popup-empty">Carregando fluxos…</div>
         </div>
       </section>
-      <button id="openEditor" class="primary popup-wide-button">Abrir WhatsFlow</button>
+      <button id="openEditor" class="primary popup-wide-button">Abrir CRM Flow</button>
     </div>
 
     <section
@@ -57,6 +75,7 @@
       aria-labelledby="extractTab"
       hidden
     >
+      <h2 class="extract-title">Extrair números do WhatsApp</h2>
       <div class="extract-source-tabs" role="radiogroup" aria-label="Origem dos contatos">
         <button
           class="extract-source-tab active"
@@ -146,9 +165,189 @@
       </div>
       <div id="extractionStatus" class="extract-status" aria-live="polite"></div>
     </section>
+
+    <section
+      id="emailPanel"
+      class="popup-panel email-sender"
+      role="tabpanel"
+      aria-labelledby="emailTab"
+      hidden
+    >
+      <h2 class="email-campaign-title">Disparar e-mail marketing</h2>
+      <nav class="email-page-tabs" role="tablist" aria-label="Etapas da campanha de email">
+        <button
+          id="emailContentPageTab"
+          type="button"
+          class="email-page-tab active"
+          role="tab"
+          aria-selected="true"
+          aria-controls="emailContentPage"
+          data-email-page="emailContentPage"
+        >Conteúdo</button>
+        <button
+          id="emailContactsPageTab"
+          type="button"
+          class="email-page-tab"
+          role="tab"
+          aria-selected="false"
+          aria-controls="emailContactsPage"
+          data-email-page="emailContactsPage"
+        >Lista</button>
+        <button
+          id="emailControlPageTab"
+          type="button"
+          class="email-page-tab"
+          role="tab"
+          aria-selected="false"
+          aria-controls="emailControlPage"
+          data-email-page="emailControlPage"
+        >Disparo</button>
+      </nav>
+
+      <section id="emailContentPage" class="email-page" role="tabpanel" aria-labelledby="emailContentPageTab">
+        <h2>Conteúdo Gmail</h2>
+
+        <div id="emailVariations" class="email-variations"></div>
+        <div class="email-variation-actions">
+          <button id="addEmailVariation" type="button" class="email-variation-add">
+            <span aria-hidden="true">+</span> Adicionar outra variação
+          </button>
+          <span id="emailVariationChance" class="email-variation-chance"></span>
+        </div>
+      </section>
+
+      <section id="emailContactsPage" class="email-page" role="tabpanel" aria-labelledby="emailContactsPageTab" hidden>
+        <section class="email-box contact-list-box">
+          <div class="contact-list-heading">
+            <div class="contact-list-title">
+              <div class="box-title">Lista de contatos</div>
+            </div>
+            <button id="downloadModel" type="button" class="contact-model-link">Modelo CSV</button>
+          </div>
+          <div class="contact-source-options" role="group" aria-label="Origem da lista de contatos">
+            <button
+              id="newEmailFileButton"
+              type="button"
+              class="contact-source-option"
+            >Subir lista</button>
+            <input id="fileInput" type="file" accept=".csv,.txt,text/csv,text/plain" multiple hidden>
+            <button
+              id="toggleSavedEmailLists"
+              type="button"
+              class="contact-source-option"
+              aria-haspopup="dialog"
+              aria-expanded="false"
+              aria-controls="savedEmailListsModal"
+            >Usar lista salva</button>
+            <button
+              id="openEmailListSave"
+              type="button"
+              class="list-save-open contact-list-save"
+              aria-label="Salvar lista atual"
+              title="Salvar lista atual"
+              hidden
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 3h13l3 3v15H4z"></path>
+                <path d="M8 3v6h8V3"></path>
+                <path d="M8 21v-7h8v7"></path>
+              </svg>
+            </button>
+          </div>
+          <div id="listPreviewContainer" class="list-preview-box hidden">
+            <div id="listPreview" class="list-preview hidden">
+              <div id="listPreviewHeader"></div>
+              <div id="activeEmailLists" class="active-email-lists hidden"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <div
+        id="emailListSaveModal"
+        class="email-list-save-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="emailListSaveTitle"
+        hidden
+      >
+        <div class="email-list-save-dialog">
+          <div class="email-list-save-dialog-head">
+            <strong id="emailListSaveTitle">Salvar lista</strong>
+            <button id="closeEmailListSave" type="button" aria-label="Fechar">×</button>
+          </div>
+          <label for="emailListName">Nome da lista</label>
+          <div class="email-list-save-row">
+            <input id="emailListName" type="text" maxlength="80" placeholder="Ex.: Clientes de outubro">
+            <button id="saveEmailList" type="button" disabled>Salvar</button>
+          </div>
+          <div id="savedEmailListFeedback" class="saved-email-list-feedback" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div
+        id="savedEmailListsModal"
+        class="email-list-save-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="savedEmailListsTitle"
+        hidden
+      >
+        <div class="email-list-save-dialog saved-email-lists-dialog">
+          <div class="email-list-save-dialog-head">
+            <div class="saved-email-lists-title">
+              <strong id="savedEmailListsTitle">Listas salvas</strong>
+              <span id="savedEmailListCount" class="saved-email-list-count">0</span>
+            </div>
+            <button id="closeSavedEmailLists" type="button" aria-label="Fechar">×</button>
+          </div>
+          <div id="savedEmailLists" class="saved-email-lists">
+            <div class="saved-email-lists-empty">Nenhuma lista salva.</div>
+          </div>
+        </div>
+      </div>
+
+      <section id="emailControlPage" class="email-page" role="tabpanel" aria-labelledby="emailControlPageTab" hidden>
+        <section class="email-box">
+          <div class="box-title">Controle de disparo por blocos</div>
+          <label class="slider-label"><span>Emails por bloco</span><strong><span id="blockSizeValue">30</span> emails</strong></label>
+          <input id="blockSize" class="range" type="range" min="1" max="150" step="1" value="30">
+          <div class="timing-grid">
+            <label><span>Intervalo Min. (s)</span><input id="minDelay" type="number" min="1" step="1" value="60"></label>
+            <label><span>Máx. (s)</span><input id="maxDelay" type="number" min="1" step="1" value="180"></label>
+            <label><span>Pausa (min) Bloco</span><input id="blockPause" type="number" min="0" step="1" value="60"></label>
+          </div>
+        </section>
+
+        <div class="estimate-label">Resumo da campanha:</div>
+        <div id="blockEstimate" class="estimate">Suba uma lista para calcular os blocos.</div>
+        <div class="email-actions"><button id="start" type="button">Iniciar envio</button><button id="stop" type="button" class="secondary">Parar</button></div>
+      </section>
+      <p id="status" aria-live="polite"></p>
+    </section>
+
+    <section
+      id="instagramPanel"
+      class="popup-panel instagram-panel"
+      role="tabpanel"
+      aria-labelledby="instagramTab"
+      hidden
+    >
+      <img src="ig-logo.png" alt="Instagram" class="instagram-panel-icon">
+      <div class="instagram-feature-list" aria-label="Recursos do Instagram">
+        <div><strong>Kanban do Direct</strong><span>Carrega Primary e General, organiza contatos em colunas e mantém a ordem dos cards.</span></div>
+        <div><strong>CRM e notas</strong><span>Exibe perfil, seguidores, seguindo, “Segue você”, WhatsApp e notas da conversa.</span></div>
+        <div><strong>Chatbots e mensagens</strong><span>Automatiza gatilhos no Instagram e agiliza envios com modelos, etiquetas e mensagens em massa.</span></div>
+      </div>
+      <button id="openInstagram" class="primary popup-wide-button instagram-open-button" type="button">
+        Abrir Instagram
+      </button>
+    </section>
   </main>
   <div id="extensionVersion" class="extension-version">Versão</div>
   <script src="extractor-utils.js"></script>
   <script src="popup.js"></script>
+  <script type="module" src="gmail-popup.js"></script>
+  <script type="module" src="gmail-lists.js"></script>
 </body>
 </html>
