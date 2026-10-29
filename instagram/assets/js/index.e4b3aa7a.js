@@ -682,7 +682,7 @@ var Zs = ({
     };
   },
   tl = vr`
-  z-index: 9999;
+  z-index: 2147483647;
   > * {
     pointer-events: auto;
   }
@@ -703,7 +703,7 @@ var Zs = ({
       {
         style: {
           position: "fixed",
-          zIndex: 9999,
+          zIndex: 2147483647,
           top: Ht,
           left: Ht,
           right: Ht,
@@ -8835,6 +8835,10 @@ function hg(e) {
     e.classList.remove("flowsi-chatbox-border"));
 }
 async function flowsiOpenChatFromProfile_20261028(e, t) {
+  e = String(e || "")
+    .trim()
+    .replace(/^@+/, "")
+    .toLowerCase();
   let n = {},
     i = String(t || "").trim();
   if (!/^\d{10,}$/.test(i)) {
@@ -8863,8 +8867,7 @@ async function flowsiOpenChatFromProfile_20261028(e, t) {
               return !1;
             }
           });
-      if (l && (g || (location.pathname === u && Date.now() - d > 900)))
-        return u;
+      if (l && g) return u;
       if (location.pathname !== u && Date.now() - d > 1200) return null;
     }
     return null;
@@ -8872,6 +8875,7 @@ async function flowsiOpenChatFromProfile_20261028(e, t) {
   if (/^\d{10,}$/.test(i)) {
     const s = await o(i);
     if (s) return s;
+    (delete n[e], chrome.storage.local.set({ flowsiThreadByUsername: n }));
   }
   yg("/" + encodeURIComponent(e) + "/");
   const a = Date.now();
@@ -8900,10 +8904,6 @@ async function flowsiOpenChatFromProfile_20261028(e, t) {
       c = g;
       break;
     }
-    if (Date.now() - d > 4e3 && p[0]) {
-      c = p[0];
-      break;
-    }
     if (location.pathname.startsWith("/direct/t/")) {
       c = location.pathname;
       break;
@@ -8912,9 +8912,10 @@ async function flowsiOpenChatFromProfile_20261028(e, t) {
   }
   if (!c) throw new Error("O Instagram não informou o endereço da conversa.");
   const p = c.match(/^\/direct\/t\/(\d+)/);
+  if (!p) throw new Error("O Instagram retornou uma conversa inválida.");
   return (
-    p &&
-      ((n[e] = p[1]), chrome.storage.local.set({ flowsiThreadByUsername: n })),
+    (n[e] = p[1]),
+    chrome.storage.local.set({ flowsiThreadByUsername: n }),
     yg(c),
     c
   );
@@ -9526,7 +9527,7 @@ function bg({
       try {
         (await flowsiOpenChatFromProfile_20261028(
           e.username,
-          e.threadId || e.id,
+          e.threadId,
         ),
           flowsiSyncProfilePhotoFromChat_20261028(e.username),
           await flowsiPresentDirectChatModal_20261028());
@@ -10741,6 +10742,9 @@ function Mg({ setActiveOverlay: e, updateKanbanColumn: t }) {
           profile: E,
           columnId: b.id,
           index: q.index,
+          order: flowsiOptimisticDestination_20261029.profiles
+            .map((R) => String((R && R.username) || "").trim())
+            .filter(Boolean),
         },
         (R) => {
           R && R.success
@@ -11723,7 +11727,13 @@ const it = (e) =>
       ""
     );
   },
-  tn = (e) => e.replace(/<name>/g, Lg()),
+  flowsiFirstName = (e) => String(e || "").trim().split(/\s+/)[0] || "",
+  tn = (e) => {
+    const t = Lg();
+    return String(e || "")
+      .replace(/<\s*(?:name|nome)\s*>/gi, () => t)
+      .replace(/<\s*primeironome\s*>/gi, () => flowsiFirstName(t));
+  },
   Fg = (e) => chrome.storage.local.set({ quickMessages: e }),
   no = (e) => chrome.storage.local.set({ quickFolders: e }),
   gr = {
@@ -12500,13 +12510,15 @@ const it = (e) =>
                     gap: "10px",
                     justifyContent: "center",
                   },
-                  children: f("span", {
-                    className: "flowsi-badge",
-                    style: { cursor: "pointer" },
-                    onClick: () =>
-                      s((M) => ({ ...M, content: M.content + " <name>" })),
-                    children: "name",
-                  }),
+                  children: [
+                    f("span", {
+                      className: "flowsi-badge",
+                      style: { cursor: "pointer" },
+                      onClick: () =>
+                        s((M) => ({ ...M, content: M.content + " <nome>" })),
+                      children: "nome",
+                    }),
+                  ],
                 }),
               f("button", {
                 className: "flowsi-quick-message-submit-btn",
@@ -12879,7 +12891,26 @@ const Jg = () => {
       );
     }, []);
     const w = (O) => {
-        (t(e === O ? null : O), n(""), o(""));
+        const q = document.querySelector(
+            ".flowsi-chatbot-edit-inline-container",
+          ),
+          m = !!q,
+          v = q == null ? void 0 : q.closest(".flowsi-chatbot-section");
+        q &&
+          (q.remove(),
+          (v || document)
+            .querySelectorAll('[data-flowsi-hidden-by-editor="true"]')
+            .forEach((b) => {
+              ((b.hidden = !1),
+                b.style.removeProperty("display"),
+                delete b.dataset.flowsiHiddenByEditor);
+            }));
+        (m && e === O
+          ? (t(null), setTimeout(() => t(O), 0))
+          : t(m ? O : e === O ? null : O),
+          g([]),
+          n(""),
+          o(""));
       },
       P = () => {
         (t(null), g([]), n(""), o(""));
@@ -13118,33 +13149,82 @@ const Jg = () => {
       [g, h] = x.exports.useState(""),
       [y, D] = x.exports.useState(""),
       [C, w] = x.exports.useState("nao");
+    const flowsiBulkLoadColumns_20261029 = () => {
+      chrome.storage.local.get(
+        ["kanbanColumns"],
+        ({ kanbanColumns: N = [] }) => {
+          const B = Array.isArray(N)
+              ? N.filter((W) => W && W.id && W.id !== "all-chats")
+              : [],
+            W = new Set(B.map((X) => String(X.id)));
+          (o([{ id: "all-chats", title: S("first_column_title"), profiles: [] }, ...B]),
+            n((X) => (W.has(String(X)) ? X : "")),
+            h((X) => (W.has(String(X)) ? X : "")));
+        },
+      );
+    };
     x.exports.useEffect(() => {
-      (He(),
-        chrome.storage.local.get(
-          ["kanbanColumns"],
-          ({ kanbanColumns: N = [] }) => {
-            (console.log({ kanbanColumns: N }), o(N), N[0] && n(N[0].id));
-          },
-        ));
+      He();
+      flowsiBulkLoadColumns_20261029();
+      const N = (B, W) => {
+          W === "local" && B.kanbanColumns && flowsiBulkLoadColumns_20261029();
+        },
+        B = () => flowsiBulkLoadColumns_20261029(),
+        W = () => {
+          document.visibilityState === "visible" && flowsiBulkLoadColumns_20261029();
+        };
+      return (
+        chrome.storage.onChanged.addListener(N),
+        window.addEventListener("focus", B),
+        document.addEventListener("visibilitychange", W),
+        () => {
+          (chrome.storage.onChanged.removeListener(N),
+            window.removeEventListener("focus", B),
+            document.removeEventListener("visibilitychange", W));
+        }
+      );
     }, []);
     const P = (N) => {
-        var X;
         N.preventDefault();
-        const B = i.find((V) => V.id === r),
+        const B = i.find((V) => V.id === r);
+        if (!B || !Array.isArray(B.profiles) || !B.profiles.length) {
+          Y.error("Selecione uma coluna que tenha contatos.");
+          return;
+        }
+        const flowsiBulkUniqueProfiles_20261029 = [
+            ...new Map(
+              B.profiles
+                .map((V) => [
+                  String((V == null ? void 0 : V.username) || "")
+                    .replace(/^@+/, "")
+                    .trim()
+                    .toLowerCase(),
+                  V,
+                ])
+                .filter(([V]) => V),
+            ).values(),
+          ],
+          flowsiBulkCampaignId_20261029 = `bulk-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           W = {
-            profiles: B.profiles,
-            totalProfileCount:
-              (X = B == null ? void 0 : B.profiles) == null ? void 0 : X.length,
-            waitTime: s,
-            branchSize: d,
-            branchGap: p,
-            message: e,
-            onSuccessLabel: C === "sim" ? "" : g,
-            removeLabel: C,
-            onSuccessLabelRemove: r,
-          };
+          profiles: flowsiBulkUniqueProfiles_20261029.map((V) => ({ ...V })),
+          totalProfileCount: flowsiBulkUniqueProfiles_20261029.length,
+          waitTime: s,
+          branchSize: d,
+          branchGap: p,
+          message: e,
+          onSuccessLabel: C === "sim" ? "" : g,
+          removeLabel: C,
+          onSuccessLabelRemove: r,
+          sentInCurrentBlock: 0,
+          startedAt: Date.now(),
+          campaignId: flowsiBulkCampaignId_20261029,
+        };
         chrome.storage.local.set({ bulkdata: W }, () => {
-          window.open("https://www.instagram.com/direct/inbox/?bulkMode=true");
+          if (chrome.runtime.lastError) {
+            Y.error("Não foi possível iniciar a campanha.");
+            return;
+          }
+          Im();
         });
       },
       _ = (N) => {
@@ -13192,15 +13272,9 @@ const Jg = () => {
                 children: [
                   f("span", {
                     className: "flowsi-badge",
-                    onClick: () => _("<username>"),
+                    onClick: () => _("<nome>"),
                     style: { cursor: "pointer" },
-                    children: "username",
-                  }),
-                  f("span", {
-                    className: "flowsi-badge",
-                    onClick: () => _("<name>"),
-                    style: { cursor: "pointer" },
-                    children: "name",
+                    children: "nome",
                   }),
                 ],
               }),
@@ -13224,6 +13298,7 @@ const Jg = () => {
                 id: "recipientType",
                 className: "flowsi-bulk-sender-select",
                 value: r,
+                onFocus: flowsiBulkLoadColumns_20261029,
                 onChange: (N) => {
                   (n(N.target.value), D(N.target.value));
                 },
@@ -13234,10 +13309,8 @@ const Jg = () => {
                   }),
                   i
                     .slice(1)
-                    .map(
-                      (N) =>
-                        N.profiles.length > 0 &&
-                        f("option", { value: N.id, children: N.title }, N.id),
+                    .map((N) =>
+                      f("option", { value: N.id, children: N.title }, N.id),
                     ),
                 ],
               }),
@@ -13289,12 +13362,13 @@ const Jg = () => {
                   id: "onSuccessLabel",
                   className: "flowsi-bulk-sender-select",
                   value: g,
-                  required: !0,
+                  onFocus: flowsiBulkLoadColumns_20261029,
                   onChange: (N) => h(N.target.value),
                   children: [
                     f("option", {
                       value: "",
-                      children: S("select_column_placeholder"),
+                      children:
+                        S("bulk_keep_current_column") || "Manter coluna atual",
                     }),
                     i
                       .slice(1)
@@ -15862,8 +15936,29 @@ window.addEventListener("message", (e) => {
   try {
     let i = function () {
       console.log("Connected to MQTT broker");
-      let p = new lo.Message(JSON.stringify(c));
-      ((p.destinationName = "/ig_send_message"), n.send(p));
+      n.subscribe("/ig_send_message_response", {
+        qos: 0,
+        onSuccess: () => {
+          let p = new lo.Message(JSON.stringify(c));
+          p.destinationName = "/ig_send_message";
+          try {
+            messagePublished = !0;
+            n.send(p);
+          } catch (error) {
+            reportResult(
+              !1,
+              (error == null ? void 0 : error.message) ||
+                "Não foi possível publicar a mensagem no Instagram.",
+            );
+          }
+        },
+        onFailure: (result) =>
+          reportResult(
+            !1,
+            (result == null ? void 0 : result.errorMessage) ||
+              "Não foi possível assinar a confirmação do Instagram.",
+          ),
+      });
     };
     if (t === "updateThreadListPM") {
       chrome.storage.local.get("oldest_cursor", ({ oldest_cursor: p }) => {
@@ -15889,7 +15984,19 @@ window.addEventListener("message", (e) => {
       });
       return;
     }
-    if (t !== "INJECT_DISPATCH_DM_REQUEST") return;
+    if (t !== "INJECT_DISPATCH_DM_REQUEST_V5") return;
+    const dispatchRequestId = String(
+      (e == null ? void 0 : e.data == null ? void 0 : e.data.request_id) || "",
+    );
+    if (dispatchRequestId) {
+      const handledDispatches =
+        window.__flowsiHandledDispatchDmV5 instanceof Set
+          ? window.__flowsiHandledDispatchDmV5
+          : (window.__flowsiHandledDispatchDmV5 = new Set());
+      if (handledDispatches.has(dispatchRequestId)) return;
+      handledDispatches.add(dispatchRequestId);
+      window.setTimeout(() => handledDispatches.delete(dispatchRequestId), 12e4);
+    }
     console.log("Request received to send direct message");
     var n = new lo.Client(
       "edge-chat.instagram.com",
@@ -15902,15 +16009,18 @@ window.addEventListener("message", (e) => {
       viewer_id: a,
       text: s,
       request_id: requestId,
+      client_context: requestedClientContext,
     } = e.data;
+    const mqttSessionId = co(),
+      deviceId = uo();
     let u = JSON.stringify({
         u: a,
-        s: co(),
-        cp: 1,
-        ecp: 0,
+        s: mqttSessionId,
+        cp: 3,
+        ecp: 10,
         chat_on: !0,
         fg: !0,
-        d: uo(),
+        d: deviceId,
         ct: "cookie_auth",
         mqtt_sid: "",
         aid: 936619743392459,
@@ -15921,17 +16031,31 @@ window.addEventListener("message", (e) => {
         asi: { "Accept-Language": "en" },
         a: navigator.userAgent,
       }),
-      d = co(),
+      d = /^\d{10,}$/.test(String(requestedClientContext || ""))
+        ? String(requestedClientContext)
+        : String(co()),
       c = {
         client_context: d,
-        device_id: uo().toUpperCase(),
+        device_id: deviceId,
         action: "send_item",
         item_type: "text",
-        mutation_token: d - 1e5,
+        mutation_token: d,
         text: s,
         thread_id: o,
       };
-    const reportResult = (success, error = "") => {
+    let messagePublished = !1,
+      resultReported = !1,
+      acknowledgementTimeout = window.setTimeout(
+        () => reportResult(!1, "O Instagram não confirmou o envio em tempo hábil."),
+        12e3,
+      );
+    const reportResult = (success, error = "", acknowledgement = null) => {
+      if (resultReported) return;
+      resultReported = !0;
+      window.clearTimeout(acknowledgementTimeout);
+      try {
+        n.disconnect();
+      } catch (_) {}
       if (!requestId) return;
       window.postMessage(
         {
@@ -15940,11 +16064,67 @@ window.addEventListener("message", (e) => {
           success,
           error,
           transport: "instagram-mqtt",
+          delivery_attempted: messagePublished,
+          acknowledgement,
         },
         "*",
       );
     };
-    n.onMessageDelivered = () => reportResult(!0);
+    n.onMessageArrived = (message) => {
+      if (
+        (message == null ? void 0 : message.destinationName) !==
+        "/ig_send_message_response"
+      )
+        return;
+      let acknowledgement = null;
+      try {
+        acknowledgement = JSON.parse(message.payloadString || "{}");
+      } catch (error) {
+        reportResult(!1, "O Instagram retornou uma confirmação inválida.");
+        return;
+      }
+      const acknowledgementContext = String(
+          (acknowledgement == null ? void 0 : acknowledgement.client_context) ||
+            (acknowledgement == null
+              ? void 0
+              : acknowledgement.payload == null
+                ? void 0
+                : acknowledgement.payload.client_context) ||
+            "",
+        ),
+        statusCodeValue =
+          (acknowledgement == null ? void 0 : acknowledgement.status_code) ??
+          (acknowledgement == null
+            ? void 0
+            : acknowledgement.payload == null
+              ? void 0
+              : acknowledgement.payload.status_code),
+        hasStatusCode =
+          statusCodeValue !== void 0 &&
+          statusCodeValue !== null &&
+          statusCodeValue !== "",
+        statusCode = Number(statusCodeValue);
+      if (acknowledgementContext && acknowledgementContext !== String(d)) return;
+      const accepted =
+          (acknowledgement == null ? void 0 : acknowledgement.status) === "ok" ||
+          ((acknowledgement == null ? void 0 : acknowledgement.action) ===
+            "item_ack" &&
+            hasStatusCode &&
+            (statusCode === 0 || (statusCode >= 200 && statusCode < 300))),
+        rejected =
+          (acknowledgement == null ? void 0 : acknowledgement.status) === "fail" ||
+          (hasStatusCode &&
+            statusCode !== 0 &&
+            (statusCode < 200 || statusCode >= 300));
+      if (accepted) reportResult(!0, "", acknowledgement);
+      else if (rejected)
+        reportResult(
+          !1,
+          (acknowledgement == null ? void 0 : acknowledgement.message) ||
+            `O Instagram recusou a mensagem (HTTP ${statusCode || "desconhecido"}).`,
+          acknowledgement,
+        );
+    };
     n.onConnectionLost = (result) => {
       if ((result == null ? void 0 : result.errorCode) !== 0)
         reportResult(!1, (result == null ? void 0 : result.errorMessage) || "Conexão em tempo real encerrada.");
@@ -15963,7 +16143,7 @@ window.addEventListener("message", (e) => {
   }
 });
 function co() {
-  return Math.random() * Number.MAX_SAFE_INTEGER;
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
 }
 function uo() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (e) {
@@ -16007,7 +16187,7 @@ async function gm(e, t) {
   i
     ? window.postMessage(
         {
-          type: "INJECT_DISPATCH_DM_REQUEST",
+          type: "INJECT_DISPATCH_DM_REQUEST_V5",
           thread_id: i,
           viewer_id: r.viewer_id,
           user: n,
@@ -16151,32 +16331,46 @@ function xm() {
     (e.style.left = "0"),
     (e.style.width = "100%"),
     (e.style.height = "100%"),
-    (e.style.backgroundColor = "rgba(0, 0, 0, 0.8)"),
+    (e.style.backgroundColor = "rgba(0, 0, 0, 0.35)"),
     (e.style.color = "white"),
     (e.style.display = "flex"),
     (e.style.flexDirection = "column"),
     (e.style.justifyContent = "center"),
     (e.style.alignItems = "center"),
-    (e.style.zIndex = "9999"),
+    (e.style.zIndex = "10000000000000000001"),
     (e.style.fontFamily = "Arial, sans-serif"),
     (e.style.fontSize = "18px"),
     (e.style.textAlign = "center"),
     (e.style.padding = "20px"),
     {
-      updateStatus: (t, r, n, i) => {
+      updateStatus: (t, r, n, i, o = !0) => {
+        const a = (s) =>
+          String(s == null ? "" : s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
         e.innerHTML = `
         <div class="flowsi-status-box">
           <h2 class="flowsi-status-title">${S("bulk_status_title")}</h2>
-          <p class="flowsi-status-info">${t}</p>
-          <p class="flowsi-status-info">${S("recipient_text")}: <span class="flowsi-highlight">${r}</span></p>
-          <p class="flowsi-status-info">${S("bulk_message_remain_text")}: <span class="flowsi-highlight">${n}/<span style='color:lime'>${i}</span></span></p>
+          <p class="flowsi-status-info">${a(t)}</p>
+          <p class="flowsi-status-info">${S("recipient_text")}: <span class="flowsi-highlight">${a(r)}</span></p>
+          <p class="flowsi-status-info">${S("bulk_message_remain_text")}: <span class="flowsi-highlight">${a(n)}/<span style='color:green'>${a(i)}</span></span></p>
        <div style="text-align:center; padding-top: 15px">
-        <a class='flowsi-bulk-stop-button' href="https://www.instagram.com/">${S("stop_text")}</a>
+        ${o ? `<button type="button" class='flowsi-bulk-stop-button' id="flowsi-bulk-stop-20261029">${S("stop_text")}</button>` : ""}
 
         <p style='color: black; margin-top: 25px; margin-bottom: 0'>*** ${S("bulk_message_suggesion")}</p>
         </div>
           </div>
       `;
+        const s = e.querySelector("#flowsi-bulk-stop-20261029");
+        s &&
+          s.addEventListener("click", () => {
+            flowsiBulkCampaignCancelled_20261029 = !0;
+            chrome.storage.local.remove(["bulkdata"]);
+            e.style.display = "none";
+          });
       },
       hide: () => {
         e.style.display = "none";
@@ -16188,150 +16382,217 @@ function xm() {
   );
 }
 setTimeout(() => {
-  wm && Im();
+  if (!wm) return;
+  // Campanhas da versão antiga eram retomadas automaticamente ao abrir uma
+  // aba ?bulkMode=true. Não dispare mensagens de uma campanha antiga sem um
+  // novo clique explícito do usuário.
+  chrome.storage.local.remove(["bulkdata"]);
+  try {
+    const e = new URL(window.location.href);
+    (e.searchParams.delete("bulkMode"), history.replaceState(null, "", e));
+  } catch (_) {}
 }, 1e3);
-function Im() {
+let flowsiBulkCampaignRunning_20261029 = !1,
+  flowsiBulkCampaignCancelled_20261029 = !1;
+const flowsiBulkStorageGet_20261029 = (e) =>
+    new Promise((t, r) => {
+      chrome.storage.local.get(e, (n) => {
+        const i = chrome.runtime.lastError;
+        i ? r(new Error(i.message)) : t(n);
+      });
+    }),
+  flowsiBulkStorageSet_20261029 = (e) =>
+    new Promise((t, r) => {
+      chrome.storage.local.set(e, () => {
+        const n = chrome.runtime.lastError;
+        n ? r(new Error(n.message)) : t();
+      });
+    }),
+  flowsiBulkStorageRemove_20261029 = (e) =>
+    new Promise((t) => chrome.storage.local.remove(e, t)),
+  flowsiBulkSendConfirmed_20261029 = (e, t, r) =>
+    new Promise((n, i) => {
+      chrome.runtime.sendMessage(
+        {
+          action: "flowsiBulkSendMessage",
+          username: String((e == null ? void 0 : e.username) || "")
+            .replace(/^@+/, "")
+            .trim(),
+          message: t,
+          threadId: String((e == null ? void 0 : e.threadId) || "").trim(),
+          campaignId: String(r || ""),
+          recipientKey: String((e == null ? void 0 : e.username) || "")
+            .replace(/^@+/, "")
+            .trim()
+            .toLowerCase(),
+        },
+        (o) => {
+          const a = chrome.runtime.lastError;
+          a
+            ? i(new Error(a.message))
+            : o && o.success
+              ? n(o.result || { status: "sent" })
+              : i(
+                  new Error(
+                    (o && o.error) ||
+                      "O Instagram não confirmou o envio da mensagem.",
+                  ),
+                );
+        },
+      );
+    }),
+  flowsiBulkCrmMutation_20261029 = (e) =>
+    new Promise((t, r) => {
+      chrome.runtime.sendMessage(
+        { action: "flowsiCrmMutate", ...e },
+        (n) => {
+          const i = chrome.runtime.lastError;
+          i
+            ? r(new Error(i.message))
+            : n && n.success
+              ? t(n)
+              : r(
+                  new Error(
+                    (n && n.error) ||
+                      "Não foi possível atualizar a etiqueta do contato.",
+                  ),
+                );
+        },
+      );
+    }),
+  flowsiBulkApplyLabels_20261029 = async (e, t, r) => {
+    const n = String((e == null ? void 0 : e.username) || "")
+      .replace(/^@+/, "")
+      .trim()
+      .toLowerCase();
+    if (!n) throw new Error("Não foi possível identificar o contato para atualizar a etiqueta.");
+    if (t === "sim")
+      return flowsiBulkCrmMutation_20261029({
+        mutation: "remove",
+        username: n,
+      });
+    const i = String(r || "").trim();
+    if (!i) return null;
+    const { flowsiBulkDeliveryConfirmedAt: o, ...a } = e || {};
+    return flowsiBulkCrmMutation_20261029({
+      mutation: "move",
+      columnId: i,
+      username: n,
+      profile: { ...a, username: n, id: a.id || rr() },
+    });
+  },
+  flowsiBulkWait_20261029 = async (e) => {
+    const t = Date.now() + Math.max(0, Number(e) || 0);
+    for (; Date.now() < t; ) {
+      if (flowsiBulkCampaignCancelled_20261029) return !1;
+      await an(Math.min(500, t - Date.now()));
+    }
+    return !flowsiBulkCampaignCancelled_20261029;
+  };
+async function Im() {
+  if (flowsiBulkCampaignRunning_20261029) return;
+  flowsiBulkCampaignRunning_20261029 = !0;
+  flowsiBulkCampaignCancelled_20261029 = !1;
   const e = xm();
-  chrome.storage.local.get(["bulkdata"], ({ bulkdata: t }) => {
-    if (!t) return (e.hide(), Qt("/"));
-    let r = 0;
-    const n = async () => {
-      (await an(1500),
-        chrome.storage.local.get(["bulkdata"], async ({ bulkdata: i }) => {
-          let {
-            profiles: o,
-            waitTime: a,
-            branchSize: s,
-            branchGap: u,
-            message: d,
-            onSuccessLabel: c,
-            removeLabel: p,
-            onSuccessLabelRemove: l,
-          } = i;
-          const g = o.length,
-            h = o[0];
-          if (!h) {
-            (e.hide(), chrome.storage.local.remove(["bulkdata"]), Qt("/"));
-            return;
-          }
-          if (!h.messageId) {
-            (e.hide(), chrome.storage.local.remove(["bulkdata"]), Qt("/"));
-            return;
-          }
-          const y = await vm(h.username);
-          await Qt(`/direct/t/${y.messageId}/`);
-          let D = d.replace(/<name>/g, h.name);
-          ((D = D.replace(/<username>/g, h.username)),
-            e.updateStatus(
-              "Sending message...",
-              h.name,
-              g,
-              i.totalProfileCount,
-            ));
-          const C = setInterval(async () => {
-            if (window.location.href.includes(y.messageId)) {
-              (clearInterval(C), Pt(D));
-              let { kanbanColumns: w } =
-                await chrome.storage.local.get("kanbanColumns");
-              const P = { ...h, id: rr() },
-                _ = w.findIndex((B) => B.id === c),
-                N = w.findIndex((B) => B.id === l);
-              console.log({
-                newProfile: P,
-                kanbanColumns: w,
-                indexofSelectedcolumn: _,
-                onSuccessLabel: c,
-                onSuccessLabelRemove: l,
-                removeLabel: p,
-              });
-              const flowsiBulkSameProfile_20261029 = (B) => {
-                const W = String(B == null ? void 0 : B.username)
-                    .replace(/^@+/, "")
-                    .trim()
-                    .toLowerCase(),
-                  X = String(h == null ? void 0 : h.username)
-                    .replace(/^@+/, "")
-                    .trim()
-                    .toLowerCase();
-                return W && X ? W === X : B.id === h.id;
-              };
-              if (p === "sim") {
-                N >= 0 &&
-                  (w[N].profiles = w[N].profiles.filter(
-                    (B) => !flowsiBulkSameProfile_20261029(B),
-                  ));
-              } else if (_ >= 0) {
-                w[_].profiles.some(flowsiBulkSameProfile_20261029) ||
-                  w[_].profiles.push(P);
-              }
-              if (
-                (await chrome.storage.local.set({ kanbanColumns: w }),
-                r++,
-                r >= s)
-              ) {
-                (e.updateStatus(
-                  "Waiting for branch gap...",
-                  h.name,
-                  g,
-                  i.totalProfileCount,
-                ),
-                  await an(u * 1e3),
-                  o.shift(),
-                  chrome.storage.local.set(
-                    {
-                      bulkdata: {
-                        profiles: o,
-                        waitTime: a,
-                        branchSize: s,
-                        branchGap: u,
-                        message: d,
-                        totalProfileCount: i.totalProfileCount,
-                        onSuccessLabel: c,
-                        removeLabel: p,
-                        onSuccessLabelRemove: l,
-                      },
-                    },
-                    () => {
-                      window.location.replace(
-                        "https://www.instagram.com/direct/inbox/?bulkMode=true",
-                      );
-                    },
-                  ));
-                return;
-              }
-              (e.updateStatus(
-                "Waiting for next message...",
-                h.name,
-                g,
-                i.totalProfileCount,
-              ),
-                await an(a * 1e3),
-                o.shift(),
-                chrome.storage.local.set(
-                  {
-                    bulkdata: {
-                      profiles: o,
-                      waitTime: a,
-                      branchSize: s,
-                      branchGap: u,
-                      message: d,
-                      totalProfileCount: i.totalProfileCount,
-                      onSuccessLabel: c,
-                      removeLabel: p,
-                      onSuccessLabelRemove: l,
-                    },
-                  },
-                  () => {
-                    n();
-                  },
-                ));
-              return;
-            }
-          }, 1e3);
-        }));
-    };
-    n();
-  });
+  e.show();
+  try {
+    let { bulkdata: t } = await flowsiBulkStorageGet_20261029(["bulkdata"]);
+    if (!t || !Array.isArray(t.profiles) || !t.profiles.length) {
+      await flowsiBulkStorageRemove_20261029(["bulkdata"]);
+      e.hide();
+      return;
+    }
+    let r = Math.max(0, Number(t.sentInCurrentBlock) || 0);
+    const n = Math.max(1, Number(t.branchSize) || 1),
+      i = Math.max(0, Number(t.waitTime) || 0),
+      o = Math.max(0, Number(t.branchGap) || 0),
+      a = Math.max(t.profiles.length, Number(t.totalProfileCount) || 0),
+      flowsiBulkCompletedCount_20261029 = () =>
+        Math.min(a, Math.max(0, a - t.profiles.length));
+    for (; t.profiles.length && !flowsiBulkCampaignCancelled_20261029; ) {
+      const s = t.profiles[0],
+        u = String((s == null ? void 0 : s.username) || "")
+          .replace(/^@+/, "")
+          .trim();
+      if (!u) throw new Error("Um contato da campanha não possui @ válido.");
+      const d = String(s.name || u).trim(),
+        c = flowsiFirstName(d);
+      const p = String(t.message || "")
+        .replace(/<\s*(?:name|nome)\s*>/gi, () => d)
+        .replace(/<\s*primeironome\s*>/gi, () => c)
+        .replace(/<\s*username\s*>/gi, () => u);
+      if (!p.trim()) throw new Error("A mensagem da campanha está vazia.");
+      if (!s.flowsiBulkDeliveryConfirmedAt) {
+        e.updateStatus(
+          "Enviando mensagem...",
+          d,
+          flowsiBulkCompletedCount_20261029(),
+          a,
+        );
+        await flowsiBulkSendConfirmed_20261029(s, p, t.campaignId);
+        if (flowsiBulkCampaignCancelled_20261029) {
+          await flowsiBulkStorageRemove_20261029(["bulkdata"]);
+          return;
+        }
+        s.flowsiBulkDeliveryConfirmedAt = new Date().toISOString();
+        await flowsiBulkStorageSet_20261029({ bulkdata: t });
+      }
+      e.updateStatus(
+        "Atualizando etiqueta...",
+        d,
+        Math.min(a, flowsiBulkCompletedCount_20261029() + 1),
+        a,
+      );
+      await flowsiBulkApplyLabels_20261029(
+        s,
+        t.removeLabel,
+        t.onSuccessLabel,
+      );
+      t.profiles.shift();
+      r += 1;
+      t.sentInCurrentBlock = r;
+      await flowsiBulkStorageSet_20261029({ bulkdata: t });
+      if (!t.profiles.length) break;
+      if (r >= n) {
+        r = 0;
+        t.sentInCurrentBlock = 0;
+        await flowsiBulkStorageSet_20261029({ bulkdata: t });
+        e.updateStatus(
+          "Aguardando o intervalo entre blocos...",
+          d,
+          flowsiBulkCompletedCount_20261029(),
+          a,
+        );
+        if (!(await flowsiBulkWait_20261029(o * 1e3))) break;
+      } else {
+        e.updateStatus(
+          "Aguardando a próxima mensagem...",
+          d,
+          flowsiBulkCompletedCount_20261029(),
+          a,
+        );
+        if (!(await flowsiBulkWait_20261029(i * 1e3))) break;
+      }
+    }
+    if (flowsiBulkCampaignCancelled_20261029) return;
+    await flowsiBulkStorageRemove_20261029(["bulkdata"]);
+    e.updateStatus("Campanha concluída com sucesso.", "—", a, a, !1);
+    await an(2e3);
+    e.hide();
+  } catch (t) {
+    console.error("[CRM Flow] Falha no envio em massa:", t);
+    e.updateStatus(
+      `Campanha pausada: ${(t == null ? void 0 : t.message) || "falha desconhecida"}`,
+      "—",
+      "—",
+      "—",
+      !1,
+    );
+    await an(4e3);
+    e.hide();
+  } finally {
+    flowsiBulkCampaignRunning_20261029 = !1;
+  }
 }
 function an(e) {
   return new Promise((t) => setTimeout(t, e));

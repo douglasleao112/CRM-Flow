@@ -356,11 +356,14 @@
   "select_column_placeholder": {
     "message": "Selecciona una columna"
   },
+  "bulk_keep_current_column": {
+    "message": "Mantener columna actual"
+  },
   "on_success_copy_to_column": {
     "message": "Al enviar con éxito, agregar a"
   },
   "on_success_remove_column": {
-    "message": "Al enviar exitosamente, ¿eliminar la etiqueta actual?"
+    "message": "Al enviar con éxito, ¿quitar de la columna actual?"
   },
   "text_message_text": {
     "message": "Mensaje de texto"

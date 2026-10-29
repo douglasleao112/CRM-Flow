@@ -14,5 +14,12 @@ assert.match(contentScript, /split\(\/\[,\\n\]\//);
 assert.match(contentScript, /editKeywords = \[\.\.\.new Set\(\[\.\.\.editKeywords, \.\.\.additions\]\)\]/);
 assert.match(contentScript, /editKeywords = editKeywords\.filter/);
 assert.match(contentScript, /const keywords = \[\.\.\.editKeywords\]/);
+assert.match(contentScript, /id="flowsi-edit-add-label"/);
+assert.match(contentScript, /id="flowsi-edit-label-column"/);
+assert.match(contentScript, /id="flowsi-add-label"/);
+assert.match(contentScript, /id="flowsi-label-column"/);
+assert.match(contentScript, /column\.id \|\| ""\) !== "all-chats"/);
+assert.match(contentScript, /addLabel: addLabel\.checked/);
+assert.match(contentScript, /labelColumnId: addLabel\.checked \? labelSelect\.value : ""/);
 
-console.log("chatbot-editor-keywords: 7 assertions passed");
+console.log("chatbot-editor-keywords: 14 assertions passed");

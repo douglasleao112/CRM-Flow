@@ -18,9 +18,12 @@ test("o chatbot lê Primary e General dentro da sessão do Instagram", () => {
 
 test("a ponte encaminha o inbox autenticado ao background", () => {
   assert.match(loader, /flowsiChatbotReadInbox/);
-  assert.match(loader, /flowsi-chatbot-inbox-request/);
-  assert.match(background, /instagram-page\+visible-inbox/);
-  assert.match(background, /extension-background-fallback/);
+  assert.match(loader, /flowsi-chatbot-inbox-request-v2/);
+  assert.match(main, /flowsi-chatbot-inbox-request-v2/);
+  assert.match(loader, /flowsi-chatbot-inbox-response-v2/);
+  assert.match(background, /fetchDirectInboxUnified\(csrfToken\)/);
+  assert.match(background, /transports\.push\("authenticated-background"\)/);
+  assert.match(background, /mergeDirectThreadCollections/);
 });
 
 test("a última leitura do chatbot fica diagnosticável", () => {
@@ -30,30 +33,36 @@ test("a última leitura do chatbot fica diagnosticável", () => {
 });
 
 test("o envio só conclui depois da confirmação real do Instagram", () => {
-  assert.match(main, /sendChatbotDirect\(username, message, threadId\)/);
-  assert.match(main, /sendChatbotThroughThreadUi\(threadId, text, viewerId\)/);
-  assert.match(main, /resolveChatbotThread/);
+  assert.match(
+    main,
+    /sendChatbotDirect\([\s\S]{0,120}username,[\s\S]{0,80}message,[\s\S]{0,80}threadId,[\s\S]{0,80}viewerId,[\s\S]{0,80}trustedThreadId,[\s\S]{0,80}requestId/,
+  );
+  assert.match(main, /sendChatbotThroughThreadUi\(threadId, text\)/);
+  assert.match(main, /resolveChatbotDestination/);
   assert.match(main, /create_group_thread/);
   assert.match(main, /sendChatbotViaReferenceMqtt/);
-  assert.match(main, /reference-mqtt-ui-verified/);
+  assert.match(main, /mqttResult\?\.transport \|\| "instagram-mqtt"/);
   assert.match(main, /instagram-thread-ui-verified/);
   assert.match(main, /countVisibleMessages\(\) > beforeCount/);
-  assert.match(main, /broadcastPayload\?\.status !== "ok"/);
+  assert.match(main, /broadcastResponse\.ok && broadcastPayload\?\.status === "ok"/);
   assert.match(main, /transport: "instagram-page-http"/);
   assert.match(loader, /flowsiChatbotSendMessageMain/);
   assert.match(loader, /preview\}\|\$\{timeLine\}\|\$\{unreadState\}/);
   assert.match(background, /response\.status !== "sent"/);
-  assert.match(background, /fallback\.status === "queued"/);
+  assert.match(background, /fallback\.status !== "sent"/);
 });
 
 test("o chatbot resolve o usuário e o thread_id real antes de responder", () => {
   assert.match(loader, /threadId: String\(threadId \|\| ""\)/);
   assert.match(background, /candidate\.threadId/);
   assert.match(main, /existingThreadId = ""/);
-  assert.match(main, /resolveChatbotThread\([\s\S]*existingThreadId/);
-  assert.match(main, /thread_id from the resulting Direct URL|authoritative/);
-  assert.match(main, /\^\\d\+\$\/\.test\(String\(hintedThreadId/);
+  assert.match(main, /resolveChatbotDestination\([\s\S]*existingThreadId/);
+  assert.match(main, /let threadId = String\(safeTrustedThreadId \|\| cached\?\.threadId \|\| ""\)/);
+  assert.match(main, /if \(safeTrustedThreadId\)/);
+  assert.match(main, /void hintedThreadId/);
+  assert.match(main, /Never promote the URL hint to MQTT ID/);
   assert.match(main, /normalize\(user\?\.username\) === normalize\(username\)/);
+  assert.match(main, /match\?\.viewer_id/);
   assert.match(main, /recipient_users: `\["\$\{userId\}"\]`/);
   assert.match(main, /chatbotThreadCache\.set\(username/);
 });
@@ -64,9 +73,9 @@ test("o chatbot sempre combina a API com mensagens recentes do inbox visível", 
   assert.match(loader, /visibleConversationRows\(\)/);
   assert.match(loader, /flowsiChatbotDomInboxState/);
   assert.match(loader, /\^\(voce\|you\)\(:\| enviou\| sent\)/);
-  assert.match(background, /transport: "instagram-visible-inbox"/);
-  assert.match(background, /instagram-page\+visible-inbox/);
-  assert.match(background, /\.\.\.visibleThreads/);
+  assert.match(background, /transports\.push\("visible-inbox"\)/);
+  assert.match(background, /transports\.push\("authenticated-background"\)/);
+  assert.match(background, /mergeDirectThreadCollections\([\s\S]*visibleThreads/);
 });
 
 test("o chatbot abre contadores de mensagens não lidas e recupera o texto real", () => {
@@ -75,6 +84,8 @@ test("o chatbot abre contadores de mensagens não lidas e recupera o texto real"
   assert.match(loader, /readUnreadMessagesFromConversation/);
   assert.match(loader, /row\.click\(\)/);
   assert.match(loader, /aria-roledescription="message"/);
+  assert.match(loader, /article\.getAttribute\("aria-labelledby"\)/);
+  assert.match(loader, /domMessageId \|\| index/);
   assert.match(loader, /message from/);
   assert.match(loader, /dom-open-/);
   assert.match(loader, /openedThreadId/);
@@ -88,5 +99,14 @@ test("o diagnóstico informa candidatos, correspondências, envios e erros", () 
   assert.match(background, /stats\.errors/);
   assert.match(background, /stats\.lastError/);
   assert.match(background, /lastAttempt/);
+  assert.doesNotMatch(background, /action: "sendMessage"/);
+  assert.match(background, /action: "flowsiChatbotSnapshotOutgoingMessage"/);
+  assert.match(background, /action: "flowsiChatbotSendMessageMain"/);
+  assert.match(background, /action: "flowsiChatbotConfirmOutgoingMessage"/);
+  assert.match(background, /confirmation\?\.success !== true \|\| confirmation\.status !== "sent"/);
+  assert.match(background, /confirmation: "instagram-ack\+outgoing-bubble"/);
+  assert.match(loader, /reference-bundle-mqtt-dom-verified/);
+  assert.match(loader, /confirmation: "outgoing-bubble"/);
+  assert.match(loader, /\[role="article"\]\[aria-roledescription="message"\]/);
   assert.match(background, /directThreads: uniqueThreads\.length,\s*direct/);
 });

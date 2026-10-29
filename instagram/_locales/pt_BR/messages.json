@@ -42,7 +42,7 @@
       "message": "Tamanho do bloco de mensagens"
    },
    "bulk_message_remain_text": {
-      "message": "Mensagens restantes"
+      "message": "Mensagens enviadas"
    },
    "bulk_message_suggesion": {
       "message": "Por favor, não troque de aba ou minimize o Chrome"
@@ -321,10 +321,10 @@
       "message": "Notas"
    },
    "on_success_copy_to_column": {
-      "message": "Ao enviar com sucesso, adicionar a"
+      "message": "Ao enviar com sucesso, mover para"
    },
    "on_success_remove_column": {
-      "message": "Ao enviar com sucesso, remover etiqueta atual?"
+      "message": "Ao enviar com sucesso, remover da coluna atual?"
    },
    "open_chat_text": {
       "message": "Abrir Chat"
@@ -385,6 +385,9 @@
    },
    "select_column_placeholder": {
       "message": "Selecione uma coluna"
+   },
+   "bulk_keep_current_column": {
+      "message": "Manter coluna atual"
    },
    "select_language_text": {
       "message": "Selecionar idioma"

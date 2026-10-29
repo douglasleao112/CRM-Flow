@@ -71,3 +71,8 @@ test("as mensagens do Kanban usam a fila vertical de notificações", () => {
     /attributeFilter: \["data-flowsi-kanban-inbox-sync", "data-flowsi-inbox-diagnostics"\],[\s\S]{0,100}childList: true/
   );
 });
+
+test("as mensagens centrais ficam acima das janelas laterais e seus fundos escuros", () => {
+  assert.match(board, /tl = vr`\s*z-index: 2147483647;/);
+  assert.match(board, /position: "fixed",\s*zIndex: 2147483647,/);
+});

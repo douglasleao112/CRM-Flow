@@ -356,11 +356,14 @@
   "select_column_placeholder": {
     "message": "Select a column"
   },
+  "bulk_keep_current_column": {
+    "message": "Keep current column"
+  },
   "on_success_copy_to_column": {
     "message": "Upon successful sending, add to"
   },
   "on_success_remove_column": {
-    "message": "When submitting successfully, remove current label?"
+    "message": "When sending successfully, remove from current column?"
   },
   "text_message_text": {
     "message": "Text Message"

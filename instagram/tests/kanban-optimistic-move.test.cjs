@@ -18,8 +18,12 @@ assert.match(bundle, /flowsiOptimisticDestination_20261029\.profiles\.splice/);
 assert.match(bundle, /n\(flowsiOptimisticColumns_20261029\)/);
 assert.match(bundle, /: \(n\(r\),[\s\S]{0,120}Não foi possível mover o contato/);
 assert.match(bundle, /index: q\.index/);
+assert.match(bundle, /order: flowsiOptimisticDestination_20261029\.profiles/);
+assert.match(bundle, /\.map\(\(R\) => String\(\(R && R\.username\) \|\| ""\)\.trim\(\)\)/);
 assert.match(background, /const requestedIndex = Number\(message\.index\)/);
 assert.match(background, /Number\.isInteger\(requestedIndex\) && requestedIndex >= 0/);
+assert.match(background, /const requestedOrder = Array\.isArray\(message\.order\)/);
+assert.match(background, /nextTarget\.profiles = \[\.\.\.orderedProfiles, \.\.\.profilesByKey\.values\(\)\]/);
 assert.doesNotMatch(background, /Number\(message\.index\) \|\| nextTarget\.profiles\.length/);
 
-console.log("kanban-optimistic-move: 10 assertions passed");
+console.log("kanban-optimistic-move: 14 assertions passed");

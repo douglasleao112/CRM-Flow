@@ -8,16 +8,20 @@ import "./instagram/src/pages/background/index.js";
 // user's Instagram tab.
 async function restoreInstagramContentScripts() {
   const tabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
-  await Promise.allSettled(tabs
-    .filter(tab => Number.isInteger(tab.id))
-    .map(tab => chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: [
-        "instagram/src/pages/content/index.js",
-        "instagram/src/pages/content/follows-you-recovery.js",
-        "instagram/src/pages/content/contact-loader.js"
-      ]
-    })));
+  const validTabs = tabs.filter(tab => Number.isInteger(tab.id));
+  await Promise.allSettled(validTabs.map(tab => chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    files: ["instagram/src/pages/content/contact-scraper-main.js"]
+  })));
+  await Promise.allSettled(validTabs.map(tab => chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: [
+      "instagram/src/pages/content/index.js",
+      "instagram/src/pages/content/follows-you-recovery.js",
+      "instagram/src/pages/content/contact-loader.js"
+    ]
+  })));
 }
 
 chrome.runtime.onInstalled.addListener(() => {

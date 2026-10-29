@@ -3,12 +3,84 @@ const INSTAGRAM_APP_ID = "936619743392459";
 const CRM_ASSIGNMENTS_KEY = "flowsiKanbanAssignmentsV2";
 const CRM_MANUAL_CONTACTS_KEY = "flowsiManualContacts";
 let crmMutationQueue = Promise.resolve();
+let chatbotNotificationCheckInFlight = null;
+let chatbotDirectProcessingQueue = Promise.resolve();
+let chatbotCompletedActionsMutationQueue = Promise.resolve();
+
+const CHATBOT_COMPLETED_ACTIONS_KEY = "flowsiChatbotCompletedActions";
+const CHATBOT_COMPLETED_ACTIONS_LIMIT = 1000;
+const CHATBOT_DIRECT_STATE_BY_VIEWER_KEY = "flowsiChatbotDirectStateByViewer";
+const CHATBOT_DIRECT_ACTIVE_VIEWER_KEY = "flowsiChatbotDirectActiveViewerId";
+
+// Comment notifications and Direct realtime events may finish at nearly the
+// same time. A read/modify/write performed from each flow independently can
+// make the last writer erase the other acknowledgement. Keep every mutation
+// in one worker-local queue and always union it with the latest persisted
+// value before writing.
+function persistCompletedActionsUnion(actions) {
+  const additions = [...new Set(
+    [...(actions || [])].map(String).filter(Boolean)
+  )];
+  const run = chatbotCompletedActionsMutationQueue
+    .catch(() => null)
+    .then(async () => {
+      const stored = await chrome.storage.local.get(CHATBOT_COMPLETED_ACTIONS_KEY);
+      const merged = new Set(
+        (Array.isArray(stored?.[CHATBOT_COMPLETED_ACTIONS_KEY])
+          ? stored[CHATBOT_COMPLETED_ACTIONS_KEY]
+          : []).map(String)
+      );
+      for (const action of additions) merged.add(action);
+      const value = [...merged].slice(-CHATBOT_COMPLETED_ACTIONS_LIMIT);
+      await chrome.storage.local.set({ [CHATBOT_COMPLETED_ACTIONS_KEY]: value });
+      return value;
+    });
+  chatbotCompletedActionsMutationQueue = run.catch(() => null);
+  return run;
+}
 
 async function getInstagramCookies() {
   const cookies = await chrome.cookies.getAll({ domain: ".instagram.com" });
   const values = {};
   for (const cookie of cookies) values[cookie.name] = cookie.value;
   return values;
+}
+
+function viewerIdFromRurCookieValue(rawValue) {
+  let value = String(rawValue || "");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const decoded = decodeURIComponent(value);
+      if (decoded === value) break;
+      value = decoded;
+    } catch {
+      break;
+    }
+  }
+  value = value
+    .replace(/^["']+|["']+$/g, "")
+    .replace(/\\u002c/gi, ",")
+    .replace(/\\0?54/g, ",")
+    .replace(/%2c/gi, ",");
+  return value.match(/^[^,]+,(\d{5,}),/)?.[1] || "";
+}
+
+const normalizeInstagramViewerId = value => {
+  const normalized = String(value || "").trim();
+  return /^\d+$/.test(normalized) ? normalized : "";
+};
+
+async function resolveChatbotViewerId(viewerIdHint = "", cookiesHint = null) {
+  const hinted = normalizeInstagramViewerId(viewerIdHint);
+  if (hinted) return hinted;
+  const cookies = cookiesHint && typeof cookiesHint === "object"
+    ? cookiesHint
+    : await getInstagramCookies().catch(() => ({}));
+  const fromCookies = normalizeInstagramViewerId(cookies?.ds_user_id) ||
+    normalizeInstagramViewerId(viewerIdFromRurCookieValue(cookies?.rur));
+  if (fromCookies) return fromCookies;
+  const stored = await chrome.storage.local.get(CHATBOT_DIRECT_ACTIVE_VIEWER_KEY);
+  return normalizeInstagramViewerId(stored?.[CHATBOT_DIRECT_ACTIVE_VIEWER_KEY]);
 }
 
 const normalizeCrmKey = value => String(value || "")
@@ -145,6 +217,22 @@ async function applyCrmMutation(message) {
           ? Math.min(requestedIndex, nextTarget.profiles.length)
           : nextTarget.profiles.length;
         nextTarget.profiles.splice(index, 0, stableProfile);
+        const requestedOrder = Array.isArray(message.order)
+          ? message.order.map(normalizeCrmKey).filter(Boolean)
+          : [];
+        if (requestedOrder.length) {
+          const profilesByKey = new Map(
+            nextTarget.profiles.map(item => [normalizeCrmKey(item?.username), item])
+          );
+          const orderedProfiles = [];
+          for (const orderedKey of requestedOrder) {
+            const orderedProfile = profilesByKey.get(orderedKey);
+            if (!orderedProfile) continue;
+            orderedProfiles.push(orderedProfile);
+            profilesByKey.delete(orderedKey);
+          }
+          nextTarget.profiles = [...orderedProfiles, ...profilesByKey.values()];
+        }
       }
       contacts = upsertProfiles(contacts, stableProfile);
     }
@@ -411,7 +499,14 @@ function findInstagramTab(callback) {
   });
 }
 
-async function sendMessageToInstagram(username, message, preferredTabId = null, threadId = "") {
+async function sendMessageToInstagram(
+  username,
+  message,
+  preferredTabId = null,
+  threadId = "",
+  viewerIdHint = "",
+  trustedThreadIdHint = ""
+) {
   const normalizedUsername = normalizeCrmKey(username);
   const text = String(message || "").trim();
   if (!normalizedUsername || !text) {
@@ -420,6 +515,63 @@ async function sendMessageToInstagram(username, message, preferredTabId = null, 
   let tabId = preferredTabId;
   if (!tabId) tabId = await getInstagramTabId();
   if (!tabId) throw new Error("Nenhuma aba do Instagram está aberta.");
+  // The inbox payload is the freshest source for the viewer ID. Cookies are
+  // only a fallback because `rur` can lag behind account switches and may be
+  // HttpOnly. Never pass the raw cookie to the page bridge.
+  const instagramCookies = await getInstagramCookies().catch(() => ({}));
+  const hintedViewerId = String(viewerIdHint || "").trim();
+  const viewerId = /^\d+$/.test(hintedViewerId)
+    ? hintedViewerId
+    : String(instagramCookies?.ds_user_id || "").trim() ||
+      viewerIdFromRurCookieValue(instagramCookies?.rur);
+  const normalizedThreadId = String(threadId || "").trim();
+  const normalizedTrustedThreadId = String(trustedThreadIdHint || "").trim();
+  // Numeric IDs from /direct/t/<key>, CRM profiles and user search results are
+  // not necessarily the thread_id accepted by Instagram's send endpoint. Only
+  // an ID explicitly marked by an authenticated inbox/React event is trusted.
+  const trustedThreadId = /^\d+$/.test(normalizedTrustedThreadId) &&
+    normalizedTrustedThreadId === normalizedThreadId
+    ? normalizedTrustedThreadId
+    : "";
+  const deliveryId = `flowsi-delivery-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  // Capture the visible conversation before sending. The versioned sender
+  // waits for Instagram's /ig_send_message_response acknowledgement; when the
+  // destination is open we additionally require a brand-new outgoing bubble.
+  let deliverySnapshot = null;
+  try {
+    deliverySnapshot = await chrome.tabs.sendMessage(tabId, {
+      action: "flowsiChatbotSnapshotOutgoingMessage",
+      username: normalizedUsername,
+      message: text,
+      threadId: String(threadId || ""),
+      trustedThreadId
+    });
+  } catch (_) {}
+  const confirmVisibleDelivery = async result => {
+    if (deliverySnapshot?.success !== true || deliverySnapshot.activeConversation !== true) {
+      return result;
+    }
+    const confirmation = await chrome.tabs.sendMessage(tabId, {
+      action: "flowsiChatbotConfirmOutgoingMessage",
+      username: normalizedUsername,
+      message: text,
+      snapshot: deliverySnapshot
+    }).catch(error => ({
+      success: false,
+      status: "unconfirmed",
+      error: error?.message || String(error)
+    }));
+    if (confirmation?.success !== true || confirmation.status !== "sent") {
+      throw new Error(
+        confirmation?.error || "O Instagram não confirmou a nova mensagem no Direct."
+      );
+    }
+    return {
+      ...result,
+      confirmation: "instagram-ack+outgoing-bubble",
+      messageToken: confirmation.messageToken || ""
+    };
+  };
   let response = null;
   let mainError = "";
   try {
@@ -427,31 +579,85 @@ async function sendMessageToInstagram(username, message, preferredTabId = null, 
       action: "flowsiChatbotSendMessageMain",
       username: normalizedUsername,
       message: text,
-      threadId: String(threadId || "")
+      threadId: String(threadId || ""),
+      viewerId,
+      trustedThreadId,
+      deliveryId
     });
   } catch (error) {
     mainError = error?.message || String(error);
   }
   if (!response || response.success !== true || response.status !== "sent") {
+    if (response?.deliveryAttempted === true) {
+      throw new Error(
+        response.error ||
+        "A tentativa de envio já foi publicada; o fallback foi bloqueado para evitar duplicidade."
+      );
+    }
     let fallback = null;
     try {
       fallback = await chrome.tabs.sendMessage(tabId, {
         action: "flowsiChatbotSendMessage",
         username: normalizedUsername,
-        message: text
+        message: text,
+        threadId: String(threadId || ""),
+        viewerId,
+        trustedThreadId,
+        deliveryId
       });
     } catch (error) {
       mainError = [mainError, error?.message || String(error)].filter(Boolean).join("; ");
     }
-    if (!fallback || fallback.success !== true || fallback.status === "queued") {
+    if (!fallback || fallback.success !== true || fallback.status !== "sent") {
       throw new Error(
         response?.error || fallback?.error || mainError ||
         "O Instagram não confirmou o envio do Direct."
       );
     }
-    return fallback;
+    return confirmVisibleDelivery(fallback);
   }
-  return response;
+  return confirmVisibleDelivery(response);
+}
+
+const flowsiBulkSendInFlight = new Map();
+const flowsiBulkSendCompleted = new Map();
+const FLOWSI_BULK_DEDUPE_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function sendBulkMessageOnce(message, tabId) {
+  const campaignId = String(message?.campaignId || "").trim();
+  const recipientKey = normalizeCrmKey(message?.recipientKey || message?.username);
+  if (!campaignId || !recipientKey) {
+    return sendMessageToInstagram(
+      message?.username,
+      message?.message,
+      tabId,
+      message?.threadId || ""
+    );
+  }
+  const now = Date.now();
+  for (const [key, entry] of flowsiBulkSendCompleted.entries()) {
+    if (now - Number(entry?.at || 0) > FLOWSI_BULK_DEDUPE_TTL_MS) {
+      flowsiBulkSendCompleted.delete(key);
+    }
+  }
+  const key = `${campaignId}:${recipientKey}`;
+  const completed = flowsiBulkSendCompleted.get(key);
+  if (completed) return { ...completed.result, deduplicated: true };
+  if (flowsiBulkSendInFlight.has(key)) return flowsiBulkSendInFlight.get(key);
+
+  const task = sendMessageToInstagram(
+    message.username,
+    message.message,
+    tabId,
+    message.threadId || ""
+  )
+    .then(result => {
+      flowsiBulkSendCompleted.set(key, { at: Date.now(), result });
+      return result;
+    })
+    .finally(() => flowsiBulkSendInFlight.delete(key));
+  flowsiBulkSendInFlight.set(key, task);
+  return task;
 }
 
 async function fetchFollowingInBackground(username, knownProfileId = "") {
@@ -788,7 +994,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.action === "sendMessageToInstagram") {
-    sendMessageToInstagram(message.username, message.message, sender.tab?.id || null)
+    sendMessageToInstagram(
+      message.username,
+      message.message,
+      sender.tab?.id || null,
+      message.threadId || "",
+      message.viewerId || "",
+      message.trustedThreadId || ""
+    )
       .then(result => sendResponse({ success: true, result }))
       .catch(error => sendResponse({
         success: false,
@@ -796,8 +1009,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }));
     return true;
   }
+  if (message?.action === "flowsiBulkSendMessage") {
+    sendBulkMessageOnce(message, sender.tab?.id || null)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(error => sendResponse({
+        success: false,
+        error: error?.message || "Falha ao enviar a mensagem em massa."
+      }));
+    return true;
+  }
+  if (message?.action === "flowsiChatbotRealtimeEvent") {
+    processChatbotRealtimeEvent(message, sender.tab?.id || null)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(error => sendResponse({
+        success: false,
+        error: error?.message || "Falha ao processar o evento do Direct."
+      }));
+    return true;
+  }
   if (message?.action === "checkNotifications") {
-    checkNotifications()
+    checkNotifications({
+      force: message?.force === true,
+      // A realtime event belongs to the exact Instagram page that observed
+      // the floating Direct bubble. Query that tab instead of preferring a
+      // different /direct/ tab whose in-memory event map cannot contain it.
+      preferredTabId: sender.tab?.id || null
+    })
       .then(result => sendResponse({ success: true, result }))
       .catch(error => sendResponse({
         success: false,
@@ -808,9 +1045,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function getInstagramTabId() {
+const isUsableInstagramTab = tab => {
+  if (!Number.isInteger(tab?.id) || tab?.discarded === true) return false;
+  // Instagram performs long SPA navigations and Chrome can keep `status` as
+  // "loading" while the already-injected content bridge is operational. Do
+  // not drop that tab silently; sendMessage/bridge readiness is the source of
+  // truth and the next alarm retries if the document really is not ready yet.
+  return /^https:\/\/www\.instagram\.com\//i.test(String(
+    tab.url || tab.pendingUrl || ""
+  ));
+};
+
+const instagramTabPriority = tab => {
+  const url = String(tab?.url || "");
+  const isDirect = /\/direct(?:\/|$)/i.test(url);
+  // A loaded Direct tab can also provide the visible-inbox fallback. Prefer
+  // it over a generic Instagram page. A complete document wins when one is
+  // available, but a loading SPA tab remains usable as the final fallback.
+  return (isDirect ? 100 : 0) + (tab?.status === "complete" ? 50 : 0) +
+    (tab?.active ? 20 : 0) +
+    (tab?.currentWindow ? 5 : 0) + Number(tab?.lastAccessed || 0) / 1e15;
+};
+
+async function getInstagramTabId(preferredTabId = null) {
   const tabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
-  return tabs[0]?.id || null;
+  const preferred = tabs.find(tab => tab.id === preferredTabId && isUsableInstagramTab(tab));
+  if (preferred?.id) return preferred.id;
+  const selected = tabs
+    .filter(isUsableInstagramTab)
+    .sort((left, right) => instagramTabPriority(right) - instagramTabPriority(left))[0];
+  return selected?.id || null;
 }
 
 const CHATBOT_SEEN_LIMIT = 500;
@@ -830,6 +1094,7 @@ const botUsesExplicitSources = bot => [
 ].some(key => typeof bot?.[key] === "boolean");
 
 const botSourceEnabled = (bot, source) => {
+  if (source === "triggerNewFollowers") return false;
   if (botUsesExplicitSources(bot)) return bot?.[source] === true;
   // Bots created before the source checkboxes were introduced keep their
   // original comment behavior and also gain the Direct/Story trigger that the
@@ -851,7 +1116,13 @@ const botMatchesText = (bot, text) => {
 
 async function getActiveChatbots() {
   const { bots = [] } = await chrome.storage.local.get("bots");
-  return bots.filter(bot => bot?.start === true && bot?.type === "comment");
+  const sanitizedBots = bots.map(bot => bot?.triggerNewFollowers === true
+    ? { ...bot, triggerNewFollowers: false, newFollowersEnabledAt: null }
+    : bot);
+  if (sanitizedBots.some((bot, index) => bot !== bots[index])) {
+    await chrome.storage.local.set({ bots: sanitizedBots });
+  }
+  return sanitizedBots.filter(bot => bot?.start === true && bot?.type === "comment");
 }
 
 async function appendChatbotDiagnostic(entry) {
@@ -872,6 +1143,120 @@ const findTemplate = (quickMessages, bot) => {
     (!item?.type || item.type === "text")
   );
 };
+
+const normalizeChatbotContactName = value => String(value || "")
+  .replace(/\s+/g, " ")
+  .trim();
+
+const createChatbotContact = (username, ...nameCandidates) => {
+  const normalizedUsername = normalizeCrmKey(username);
+  const name = nameCandidates
+    .map(normalizeChatbotContactName)
+    .find(Boolean) || "";
+  return { username: normalizedUsername, name };
+};
+
+async function applyChatbotLabelForBot(
+  bot,
+  contact,
+  actionKey,
+  completedActions,
+  persistCompletedActions
+) {
+  if (bot?.addLabel !== true) return null;
+
+  const columnId = String(bot?.labelColumnId || "").trim();
+  if (!columnId || columnId === "all-chats") {
+    throw new Error("A etiqueta configurada no chatbot não é válida.");
+  }
+  if (completedActions.has(actionKey)) {
+    return { status: "already-completed", columnId };
+  }
+
+  const username = normalizeCrmKey(contact?.username);
+  if (!username) {
+    throw new Error("Não foi possível identificar o contato para adicionar a etiqueta.");
+  }
+  const name = normalizeChatbotContactName(
+    contact?.name || contact?.fullName || contact?.full_name || contact?.displayName
+  );
+  const result = await enqueueCrmMutation({
+    mutation: "assign",
+    columnId,
+    username,
+    profile: {
+      username,
+      name: name || username,
+      full_name: name || username,
+      id: `chatbot-${username}`,
+      source: "chatbot"
+    }
+  });
+  completedActions.add(actionKey);
+  await persistCompletedActions();
+  return { ...result, status: "assigned", columnId };
+}
+
+const personalizeChatbotMessage = (template, contact = {}) => {
+  const username = normalizeCrmKey(contact?.username);
+  const explicitName = normalizeChatbotContactName(
+    contact?.name || contact?.fullName || contact?.full_name || contact?.displayName
+  );
+  // Quick-message templates expose the complete name through <name>/<nome>
+  // and its first word through <primeironome>. Inbox payloads normally include
+  // a full_name; notification payloads do not always do so, therefore the
+  // username (without @) is the deterministic fallback. Replacement callbacks
+  // keep values containing "$" literal and never leak a known placeholder.
+  const name = explicitName || username || "";
+  const firstName = explicitName
+    ? explicitName.split(/\s+/)[0]
+    : username;
+  return String(template || "")
+    .replace(/<\s*(?:name|nome)\s*>/gi, () => name)
+    .replace(/<\s*primeironome\s*>/gi, () => firstName)
+    .replace(/<\s*username\s*>/gi, () => username)
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+(?=\r?\n|$)/g, "")
+    .trim();
+};
+
+function parseInstagramJsonText(text) {
+  const source = String(text || "");
+  let output = "";
+  let last = 0;
+  let inString = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (character === "\\") index += 1;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if ((character >= "0" && character <= "9") || character === "-") {
+      let end = index + 1;
+      while (end < source.length && /[0-9.eE+-]/.test(source[end])) end += 1;
+      const number = source.slice(index, end);
+      if (/^-?\d{16,}$/.test(number)) {
+        output += `${source.slice(last, index)}"${number}"`;
+        last = end;
+      }
+      index = end - 1;
+    }
+  }
+  return JSON.parse(output + source.slice(last));
+}
+
+async function readInstagramJson(response) {
+  if (typeof response?.text === "function") {
+    const text = await response.text();
+    if (String(text || "").trim()) return parseInstagramJsonText(text);
+  }
+  return response?.json?.() || {};
+}
 
 async function fetchNotifications(csrfToken) {
   const headers = {
@@ -900,11 +1285,8 @@ async function fetchNotifications(csrfToken) {
         failures.push(`${attempt.method} ${new URL(attempt.url).host}: HTTP ${response.status}`);
         continue;
       }
-      const data = await response.json();
-      return [
-        ...(Array.isArray(data.new_stories) ? data.new_stories : []),
-        ...(Array.isArray(data.old_stories) ? data.old_stories : [])
-      ];
+      const data = await readInstagramJson(response);
+      return collectInstagramNotifications(data);
     } catch (error) {
       failures.push(`${attempt.method} ${new URL(attempt.url).host}: ${error?.message || error}`);
     }
@@ -912,40 +1294,282 @@ async function fetchNotifications(csrfToken) {
   throw new Error(`Falha ao ler notificações: ${failures.join("; ")}`);
 }
 
-async function replyToInstagramComment(notification, replyText, csrfToken) {
-  const args = notification?.args || {};
-  const commentId = String(args.comment_id || args.comment_pk || args.pk || "").trim();
-  const mediaId = String(
-    args.media_id || args.media_pk || args.media?.id || args.media?.pk || ""
-  ).trim();
-  if (!commentId || !mediaId) {
-    throw new Error("A notificação não trouxe o ID da postagem necessário para responder.");
-  }
-  const body = new URLSearchParams({
-    comment_text: String(replyText || "").trim(),
-    replied_to_comment_id: commentId
-  }).toString();
-  const response = await fetch(
-    `https://i.instagram.com/api/v1/media/${encodeURIComponent(mediaId)}/comment/`,
-    {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-CSRFToken": csrfToken,
-        "x-requested-with": "XMLHttpRequest",
-        "x-instagram-ajax": "1",
-        "x-asbd-id": "129477",
-        "X-IG-App-ID": INSTAGRAM_APP_ID
-      },
-      body
+function collectInstagramNotifications(payload) {
+  const notifications = [];
+  const visited = new WeakSet();
+  const visit = (value, depth = 0) => {
+    if (!value || typeof value !== "object" || depth > 8 || notifications.length >= 300) return;
+    if (visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
     }
+    const args = value.args && typeof value.args === "object" ? value.args : null;
+    const hasNotificationType = Boolean(
+      value.notif_name || value.notification_type || value.type || args?.notif_name || args?.type
+    );
+    const hasNotificationActor = Boolean(
+      args?.profile_name || args?.username || args?.user || value.user || value.actor || value.profile
+    );
+    if (hasNotificationType && (args || hasNotificationActor)) notifications.push(value);
+    for (const nested of Object.values(value)) visit(nested, depth + 1);
+  };
+  visit(payload);
+  return [...new Map(notifications.map((notification, index) => {
+    const args = notification?.args || {};
+    const key = String(
+      notification?.pk || notification?.id || args?.id || args?.profile_id ||
+      `${notificationType(notification) || "notification"}:${notificationUsername(notification) || index}:${args?.timestamp || ""}`
+    );
+    return [key, notification];
+  })).values()];
+}
+
+const notificationType = notification => String(
+  notification?.notif_name || notification?.notification_type || notification?.type ||
+  notification?.args?.notif_name || notification?.args?.type || ""
+).trim().toLowerCase().replace(/[\s-]+/g, "_");
+
+const notificationUsername = notification => normalizeCrmKey(
+  notification?.args?.profile_name || notification?.args?.username ||
+  notification?.args?.user?.username || notification?.args?.actor?.username ||
+  notification?.args?.profile?.username || notification?.user?.username ||
+  notification?.actor?.username || notification?.profile?.username
+);
+
+const notificationText = notification => normalizeTriggerText(
+  notification?.args?.text || notification?.args?.message || notification?.text ||
+  notification?.message || notification?.title
+);
+
+const isFollowerNotification = notification => {
+  const type = notificationType(notification);
+  if (["follow", "new_follower", "follower", "user_followed"].includes(type)) return true;
+  const text = notificationText(notification);
+  return /(?:comecou a seguir voce|started following you|followed you|te seguiu)/i.test(text);
+};
+
+const followerNotificationId = notification => {
+  const args = notification?.args || {};
+  const username = notificationUsername(notification);
+  return String(
+    notification?.pk || notification?.id || args.profile_id || args.user_id || args.id ||
+    `${username}:${args.timestamp || notification?.timestamp || ""}`
   );
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.status !== "ok") {
-    throw new Error(payload?.message || `Falha ao responder comentário (HTTP ${response.status}).`);
+};
+
+async function fetchNotificationsFromInstagramTab(tabId, csrfToken) {
+  const failures = [];
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      action: "flowsiChatbotReadNotifications"
+    });
+    if (response?.success && Array.isArray(response.notifications)) {
+      return {
+        notifications: collectInstagramNotifications(response.notifications),
+        transport: response.transport || "instagram-page-notifications"
+      };
+    }
+    failures.push(response?.error || "a ponte da página não respondeu");
+  } catch (error) {
+    failures.push(error?.message || String(error));
   }
-  return payload;
+  try {
+    return {
+      notifications: await fetchNotifications(csrfToken),
+      transport: "extension-background-notifications"
+    };
+  } catch (error) {
+    failures.push(error?.message || String(error));
+  }
+  throw new Error(`Falha ao ler notificações: ${failures.join("; ")}`);
+}
+
+const instagramCommentContext = notification => {
+  const args = notification?.args || {};
+  // `/news/inbox/` currently returns `args.media` as an array. Older payloads
+  // used an object or a top-level media id, so keep every shape accepted.
+  const media = Array.isArray(args.media) ? args.media[0] : args.media;
+  const notificationMedia = Array.isArray(notification?.media)
+    ? notification.media[0]
+    : notification?.media;
+  const commentId = String(
+    args.comment_id || args.comment_pk || args.comment?.pk || args.comment?.id ||
+    args.comment_ids?.[0] || args.pk ||
+    notification?.comment?.pk || notification?.comment?.id || ""
+  ).trim();
+  const mediaId = String(
+    args.media_id || args.media_pk || media?.id || media?.pk || media?.media_id ||
+    args.destination?.id || args.destination?.pk || args.target_id ||
+    notificationMedia?.id || notificationMedia?.pk || notificationMedia?.media_id || ""
+  ).trim();
+  const text = String(
+    args.comment_text || args.comment?.text || args.text ||
+    notification?.comment?.text || notification?.text || ""
+  ).trim();
+  const shortcode = String(
+    args.code || args.shortcode || media?.code || media?.shortcode ||
+    notificationMedia?.code || notificationMedia?.shortcode || ""
+  ).trim();
+  const productType = String(
+    args.product_type || args.productType || media?.product_type || media?.productType ||
+    notificationMedia?.product_type || notificationMedia?.productType || ""
+  ).trim();
+  const mediaType = String(
+    args.media_type || args.mediaType || media?.media_type || media?.mediaType ||
+    notificationMedia?.media_type || notificationMedia?.mediaType || ""
+  ).trim();
+  const permalink = String(
+    args.permalink || media?.permalink || notificationMedia?.permalink || ""
+  ).trim();
+  return { commentId, mediaId, text, shortcode, productType, mediaType, permalink };
+};
+
+async function waitForInstagramChatbotBridge(tabId, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      action: "flowsiChatbotBridgeReady"
+    }).catch(() => null);
+    if (response?.success === true) return response;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw new Error("A ponte do chatbot não ficou pronta na postagem temporária.");
+}
+
+const instagramCommentReplyUrls = notification => {
+  const context = instagramCommentContext(notification);
+  const commentId = context.commentId;
+  const mediaPk = String(context.mediaId || "").split("_")[0];
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  let numericId;
+  try { numericId = BigInt(mediaPk); } catch { numericId = -1n; }
+  let calculatedShortcode = "";
+  while (numericId >= 0n) {
+    calculatedShortcode = alphabet[Number(numericId % 64n)] + calculatedShortcode;
+    numericId /= 64n;
+    if (numericId === 0n) break;
+  }
+  const shortcode = context.shortcode || calculatedShortcode;
+  if (!shortcode || !commentId) return [];
+
+  const urls = [];
+  const appendCommentPermalink = value => {
+    if (!value) return;
+    try {
+      const url = new URL(value, "https://www.instagram.com/");
+      if (url.hostname !== "www.instagram.com") return;
+      const cleanPath = url.pathname.replace(/\/+$/, "");
+      if (!/(?:^|\/)(?:p|reel|tv)\/[A-Za-z0-9_-]+$/i.test(cleanPath)) return;
+      url.pathname = `${cleanPath}/c/${commentId}/`;
+      url.search = "";
+      url.hash = "";
+      urls.push(url.href);
+    } catch {}
+  };
+  appendCommentPermalink(context.permalink);
+
+  const isReel = /(?:clip|reel)/i.test(context.productType) || context.mediaType === "2";
+  const routes = isReel ? ["reel", "p"] : ["p", "reel"];
+  for (const route of routes) {
+    urls.push(`https://www.instagram.com/${route}/${shortcode}/c/${commentId}/`);
+  }
+  return [...new Set(urls)];
+};
+
+async function replyToInstagramComment(notification, replyText, tabId) {
+  const { commentId, mediaId, text: commentText } = instagramCommentContext(notification);
+  const actorUsername = notificationUsername(notification);
+  if (!commentId || !mediaId) {
+    throw new Error("A notificação não trouxe os IDs da postagem e do comentário.");
+  }
+  const request = {
+    action: "flowsiChatbotReplyCommentMain",
+    mediaId,
+    commentId,
+    message: String(replyText || "").trim(),
+    actorUsername,
+    commentText,
+    // Public replies must be created by clicking Responder on the triggering
+    // comment. The API path can silently create a top-level @mention instead.
+    uiOnly: true
+  };
+  let response = await chrome.tabs.sendMessage(tabId, request).catch(error => ({
+    success: false,
+    status: "unconfirmed",
+    error: error?.message || String(error)
+  }));
+  if (response?.deliveryAttempted) {
+    const attemptedError = new Error(
+      response?.error || "O Instagram não confirmou a resposta pública já enviada."
+    );
+    attemptedError.deliveryAttempted = true;
+    throw attemptedError;
+  }
+  if (response?.success !== true || response?.status !== "sent") {
+    const replyUrls = instagramCommentReplyUrls(notification);
+    if (replyUrls.length && chrome.tabs?.create) {
+      let lastResponse = response;
+      for (const url of replyUrls) {
+        let replyTab = null;
+        let replyDispatched = false;
+        try {
+          replyTab = await chrome.tabs.create({
+            url,
+            active: false
+          });
+          const replyTabId = Number(replyTab?.id);
+          if (Number.isFinite(replyTabId)) {
+            const loadDeadline = Date.now() + 20000;
+            while (Date.now() < loadDeadline) {
+              const currentTab = await chrome.tabs.get(replyTabId).catch(() => null);
+              if (currentTab?.status === "complete") break;
+              await new Promise(resolve => setTimeout(resolve, 250));
+            }
+            await waitForInstagramChatbotBridge(replyTabId);
+            // From this point the request can already have reached MAIN. A
+            // lost message port is therefore ambiguous and must never cause a
+            // second public reply attempt.
+            replyDispatched = true;
+            lastResponse = await chrome.tabs.sendMessage(replyTabId, {
+              ...request,
+              uiOnly: true
+            }).catch(error => ({
+              success: false,
+              status: "unconfirmed",
+              error: error?.message || String(error),
+              deliveryAttempted: replyDispatched
+            }));
+          }
+        } catch (error) {
+          lastResponse = {
+            success: false,
+            status: "unconfirmed",
+            error: error?.message || String(error),
+            deliveryAttempted: replyDispatched
+          };
+        } finally {
+          if (Number.isFinite(Number(replyTab?.id))) {
+            await chrome.tabs.remove(Number(replyTab.id)).catch(() => {});
+          }
+        }
+        response = lastResponse;
+        if (
+          lastResponse?.success === true && lastResponse?.status === "sent" ||
+          lastResponse?.deliveryAttempted
+        ) break;
+      }
+    }
+  }
+  if (response?.success !== true || response?.status !== "sent") {
+    const replyError = new Error(
+      response?.error || "O Instagram não confirmou a resposta pública."
+    );
+    replyError.deliveryAttempted = Boolean(response?.deliveryAttempted);
+    throw replyError;
+  }
+  return response;
 }
 
 async function processInstagramNotifications(tabId, notifications, bots, csrfToken) {
@@ -972,20 +1596,18 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
       ? stored.flowsiChatbotCompletedActions
       : []).map(String)
   );
+  const persistCompletedActions = () => persistCompletedActionsUnion(completedActions);
 
   if (!stored.flowsiChatbotNotificationBaselineReady) {
     for (const notification of notifications) {
       const args = notification?.args || {};
-      const type = String(notification?.notif_name || "").toLowerCase();
+      const type = notificationType(notification);
       if (type === "comment") {
-        const id = String(args.comment_id || args.comment_pk || args.pk || "").trim();
+        const id = instagramCommentContext(notification).commentId;
         if (id) seenComments.add(id);
       }
-      if (type === "follow" || type === "new_follower") {
-        const username = normalizeCrmKey(args.profile_name || args.username || args.user?.username);
-        const id = String(
-          notification?.pk || args.profile_id || args.user_id || args.id || `${username}:${args.timestamp || ""}`
-        );
+      if (isFollowerNotification(notification)) {
+        const id = followerNotificationId(notification);
         if (id) seenFollowers.add(id);
       }
     }
@@ -999,14 +1621,32 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
 
   for (const notification of notifications) {
     const args = notification?.args || {};
-    const notificationType = String(notification?.notif_name || "").toLowerCase();
-    const username = normalizeCrmKey(
-      args.profile_name || args.username || args.user?.username
+    const currentNotificationType = notificationType(notification);
+    const username = notificationUsername(notification);
+    const contact = createChatbotContact(
+      username,
+      args.full_name,
+      args.fullName,
+      args.profile_full_name,
+      args.profile?.full_name,
+      args.profile?.fullName,
+      args.user?.full_name,
+      args.user?.fullName,
+      args.actor?.full_name,
+      args.actor?.fullName,
+      args.profile?.full_name,
+      args.profile?.fullName,
+      notification?.user?.full_name,
+      notification?.user?.fullName,
+      notification?.actor?.full_name,
+      notification?.actor?.fullName,
+      notification?.profile?.full_name,
+      notification?.profile?.fullName,
+      notification?.full_name
     );
 
-    if (notificationType === "comment") {
-      const commentId = String(args.comment_id || args.comment_pk || args.pk || "").trim();
-      const commentText = String(args.comment_text || args.text || "").trim();
+    if (currentNotificationType === "comment") {
+      const { commentId, text: commentText } = instagramCommentContext(notification);
       if (!commentId || seenComments.has(commentId)) continue;
       const matchingBots = bots.filter(bot =>
         botSourceEnabled(bot, "triggerPostComments") && botMatchesText(bot, commentText)
@@ -1022,20 +1662,42 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
         const botKey = String(bot?.id || bot?.template || "bot");
         const dmActionKey = `${commentId}:${botKey}:dm`;
         const replyActionKey = `${commentId}:${botKey}:public-reply`;
+        const labelActionKey = `${commentId}:${botKey}:label:${String(bot?.labelColumnId || "")}`;
         try {
           let sendResult = null;
+          let publicReplyResult = null;
+          let labelResult = null;
           if (!username) throw new Error("A notificação não informou o @ do autor.");
           if (!template?.content) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
+          const directMessage = personalizeChatbotMessage(template.content, contact);
+          const publicReply = personalizeChatbotMessage(bot.publicCommentReply, contact);
           if (!completedActions.has(dmActionKey)) {
-            sendResult = await sendMessageToInstagram(username, template.content, tabId);
+            sendResult = await sendMessageToInstagram(username, directMessage, tabId);
             completedActions.add(dmActionKey);
+            // Persist the Direct independently from the public reply. If the
+            // temporary Instagram tab reloads or the worker restarts while
+            // replying to the comment, the already delivered DM must not be
+            // sent again on the next poll.
+            await persistCompletedActions();
           }
+          labelResult = await applyChatbotLabelForBot(
+            bot,
+            contact,
+            labelActionKey,
+            completedActions,
+            persistCompletedActions
+          );
           if (
-            String(bot.publicCommentReply || "").trim() &&
+            publicReply &&
             !completedActions.has(replyActionKey)
           ) {
-            await replyToInstagramComment(notification, bot.publicCommentReply, csrfToken);
+            publicReplyResult = await replyToInstagramComment(
+              notification,
+              publicReply,
+              tabId
+            );
             completedActions.add(replyActionKey);
+            await persistCompletedActions();
           }
           await appendChatbotDiagnostic({
             status: "sent",
@@ -1044,16 +1706,32 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
             username,
             template: bot.template,
             transport: sendResult?.transport || "already-completed",
-            publicReply: Boolean(String(bot.publicCommentReply || "").trim())
+            publicReply: Boolean(String(bot.publicCommentReply || "").trim()),
+            publicReplyTransport: publicReply
+              ? publicReplyResult?.transport || "already-completed"
+              : null,
+            publicReplyId: publicReplyResult?.commentId || null,
+            parentCommentId: publicReplyResult?.parentCommentId || null,
+            labelColumnId: labelResult?.columnId || null
           });
         } catch (error) {
           allSucceeded = false;
+          if (error?.deliveryAttempted && !completedActions.has(replyActionKey)) {
+            // Postar was clicked. Even if the DOM confirmation timed out, a
+            // retry could publish the same public reply twice. Persist the
+            // ambiguous attempt and leave its diagnostic for manual review.
+            completedActions.add(replyActionKey);
+            await persistCompletedActions();
+          }
+          const context = instagramCommentContext(notification);
           await appendChatbotDiagnostic({
             status: "error",
             source: "post-comment",
             eventId: commentId,
             username,
             template: bot.template,
+            mediaId: context.mediaId || null,
+            parentCommentId: context.commentId || null,
             error: error?.message || String(error)
           });
         }
@@ -1062,10 +1740,8 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
       continue;
     }
 
-    if (notificationType === "follow" || notificationType === "new_follower") {
-      const followerId = String(
-        notification?.pk || args.profile_id || args.user_id || args.id || `${username}:${args.timestamp || ""}`
-      );
+    if (isFollowerNotification(notification)) {
+      const followerId = followerNotificationId(notification);
       if (!username || seenFollowers.has(followerId)) continue;
       const followerBots = bots.filter(bot => botSourceEnabled(bot, "triggerNewFollowers"));
       if (!followerBots.length) {
@@ -1080,9 +1756,11 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
         try {
           let sendResult = null;
           if (!template?.content) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
+          const directMessage = personalizeChatbotMessage(template.content, contact);
           if (!completedActions.has(dmActionKey)) {
-            sendResult = await sendMessageToInstagram(username, template.content, tabId);
+            sendResult = await sendMessageToInstagram(username, directMessage, tabId);
             completedActions.add(dmActionKey);
+            await persistCompletedActions();
           }
           await appendChatbotDiagnostic({
             status: "sent",
@@ -1110,19 +1788,133 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
 
   await chrome.storage.local.set({
     flowsiChatbotSeenComments: [...seenComments].slice(-CHATBOT_SEEN_LIMIT),
-    flowsiChatbotSeenFollowers: [...seenFollowers].slice(-CHATBOT_SEEN_LIMIT),
-    flowsiChatbotCompletedActions: [...completedActions].slice(-1000)
+    flowsiChatbotSeenFollowers: [...seenFollowers].slice(-CHATBOT_SEEN_LIMIT)
   });
+  await persistCompletedActions();
 }
 
-async function fetchDirectInboxFolder(folder, csrfToken) {
+const directThreadKey = (thread, fallbackIndex = 0) => {
+  const threadId = String(thread?.thread_id || thread?.threadId || "").trim();
+  if (threadId) return `thread:${threadId}`;
+  const participants = (Array.isArray(thread?.users) ? thread.users : [])
+    .map(user => normalizeCrmKey(user?.username) || String(user?.pk || user?.id || "").trim())
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  return participants ? `users:${participants}` : `anonymous:${fallbackIndex}`;
+};
+
+const directItemKey = (item, fallbackIndex = 0) => {
+  const itemId = String(item?.item_id || item?.client_context || item?.itemId || "").trim();
+  if (itemId) return `item:${itemId}`;
+  const timestamp = String(item?.timestamp || item?.sent_at || item?.created_at || "").trim();
+  const senderId = String(item?.user_id || item?.sender_id || "").trim();
+  const text = readDirectItemText(item);
+  return timestamp || senderId || text
+    ? `fallback:${timestamp}:${senderId}:${String(item?.item_type || "")}:${text}`
+    : `anonymous:${fallbackIndex}`;
+};
+
+const mergeDirectObjectWithoutErasing = (preferred, supplemental) => {
+  const merged = { ...(preferred || {}) };
+  for (const [key, value] of Object.entries(supplemental || {})) {
+    const current = merged[key];
+    const currentIsEmpty = current === undefined || current === null || current === "" ||
+      (Array.isArray(current) && current.length === 0);
+    if (currentIsEmpty && value !== undefined && value !== null && value !== "") {
+      merged[key] = value;
+    }
+  }
+  return merged;
+};
+
+function mergeDirectThreadCollections(...collections) {
+  const threadsByKey = new Map();
+  let anonymousThreadIndex = 0;
+  for (const collection of collections) {
+    for (const incomingThread of Array.isArray(collection) ? collection : []) {
+      if (!incomingThread || typeof incomingThread !== "object") continue;
+      const key = directThreadKey(incomingThread, anonymousThreadIndex++);
+      const existing = threadsByKey.get(key);
+      if (!existing) {
+        threadsByKey.set(key, {
+          ...incomingThread,
+          users: Array.isArray(incomingThread.users) ? [...incomingThread.users] : [],
+          items: Array.isArray(incomingThread.items) ? [...incomingThread.items] : []
+        });
+        continue;
+      }
+
+      const usersByKey = new Map();
+      for (const user of [...(existing.users || []), ...(incomingThread.users || [])]) {
+        const userKey = String(user?.pk || user?.id || "").trim() ||
+          normalizeCrmKey(user?.username);
+        if (!userKey) continue;
+        // Preserve the first source's values while filling fields it did not
+        // contain. A later, shorter payload must never erase an event actor.
+        usersByKey.set(
+          userKey,
+          mergeDirectObjectWithoutErasing(usersByKey.get(userKey), user)
+        );
+      }
+
+      const itemsByKey = new Map();
+      let anonymousItemIndex = 0;
+      for (const item of [...(existing.items || []), ...(incomingThread.items || [])]) {
+        const itemKey = directItemKey(item, anonymousItemIndex++);
+        itemsByKey.set(
+          itemKey,
+          mergeDirectObjectWithoutErasing(itemsByKey.get(itemKey), item)
+        );
+      }
+      threadsByKey.set(key, {
+        ...incomingThread,
+        ...existing,
+        users: [...usersByKey.values()],
+        items: [...itemsByKey.values()].sort((left, right) =>
+          readDirectItemTimestamp(right) - readDirectItemTimestamp(left)
+        )
+      });
+    }
+  }
+  return [...threadsByKey.values()].map(thread => ({
+    ...thread,
+    items: [...(thread.items || [])].sort((left, right) =>
+      readDirectItemTimestamp(right) - readDirectItemTimestamp(left)
+    )
+  }));
+}
+
+const inboxViewerId = payload => String(
+  payload?.viewer_id || payload?.viewerId || payload?.viewer?.pk ||
+  payload?.viewer?.id || payload?.inbox?.viewer_id || ""
+).trim();
+
+const directInboxPayloadError = payload => {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "resposta JSON inválida";
+  }
+  const status = String(payload.status || "").trim().toLowerCase();
+  if (status && status !== "ok") {
+    return `status ${status}${payload.message ? `: ${payload.message}` : ""}`;
+  }
+  if (!payload.inbox || typeof payload.inbox !== "object") {
+    return "payload sem inbox";
+  }
+  if (!Array.isArray(payload.inbox.threads)) {
+    return "payload sem inbox.threads";
+  }
+  return "";
+};
+
+async function fetchDirectInboxEndpoint(folder, csrfToken) {
   const query = new URLSearchParams({
     persistentBadging: "true",
     use_unified_inbox: "true",
     limit: "20",
-    thread_message_limit: "10",
-    folder: String(folder)
+    thread_message_limit: "10"
   });
+  if (folder !== null && folder !== undefined) query.set("folder", String(folder));
   const requestOptions = {
     credentials: "include",
     cache: "no-store",
@@ -1134,25 +1926,61 @@ async function fetchDirectInboxFolder(folder, csrfToken) {
     }
   };
   const failures = [];
-  for (const host of ["https://www.instagram.com", "https://i.instagram.com"]) {
+  // i.instagram is the authenticated mobile-web API used by the Direct data
+  // model. It is less dependent on which SPA route is currently rendered.
+  for (const host of ["https://i.instagram.com", "https://www.instagram.com"]) {
     const response = await fetch(
       `${host}/api/v1/direct_v2/inbox/?${query.toString()}`,
       requestOptions
     ).catch(error => {
-      failures.push(`${new URL(host).host}: ${error?.message || error}`);
+      failures.push(`${host.replace(/^https?:\/\//, "")}: ${error?.message || error}`);
       return null;
     });
     if (!response) continue;
     if (!response.ok) {
-      failures.push(`${new URL(host).host}: HTTP ${response.status}`);
+      failures.push(`${host.replace(/^https?:\/\//, "")}: HTTP ${response.status}`);
       continue;
     }
-    const payload = await response.json();
-    return Array.isArray(payload?.inbox?.threads) ? payload.inbox.threads : [];
+    let payload = null;
+    try {
+      payload = await readInstagramJson(response);
+    } catch (error) {
+      failures.push(
+        `${host.replace(/^https?:\/\//, "")}: JSON inválido (${error?.message || error})`
+      );
+      continue;
+    }
+    const payloadError = directInboxPayloadError(payload);
+    if (payloadError) {
+      failures.push(`${host.replace(/^https?:\/\//, "")}: ${payloadError}`);
+      continue;
+    }
+    const threads = (Array.isArray(payload?.inbox?.threads) ? payload.inbox.threads : [])
+      .map(thread => {
+        const threadId = String(thread?.thread_id || "").trim();
+        return {
+          ...thread,
+          _flowsiTrustedThreadId: /^\d+$/.test(threadId) ? threadId : ""
+        };
+      });
+    return {
+      threads,
+      viewerId: inboxViewerId(payload),
+      host: host.replace(/^https?:\/\//, ""),
+      folder: folder === null || folder === undefined ? "unified" : String(folder)
+    };
   }
   throw new Error(
-    `Falha ao ler Direct ${folder} (${failures.join("; ") || "sem resposta"}).`
+    `Falha ao ler Direct ${folder ?? "unificado"} (${failures.join("; ") || "sem resposta"}).`
   );
+}
+
+async function fetchDirectInboxFolder(folder, csrfToken) {
+  return fetchDirectInboxEndpoint(folder, csrfToken);
+}
+
+async function fetchDirectInboxUnified(csrfToken) {
+  return fetchDirectInboxEndpoint(null, csrfToken);
 }
 
 async function fetchDirectInboxFromInstagramTab(tabId, csrfToken) {
@@ -1168,54 +1996,79 @@ async function fetchDirectInboxFromInstagramTab(tabId, csrfToken) {
       return [];
     }
   };
-  try {
-    const response = await chrome.tabs.sendMessage(tabId, {
+  const pagePromise = chrome.tabs.sendMessage(tabId, {
       action: "flowsiChatbotReadInbox"
+    }).then(response => {
+      if (!response?.success) {
+        throw new Error(response?.error || "A página do Instagram não respondeu.");
+      }
+      return response;
     });
-    if (!response?.success) {
-      throw new Error(response?.error || "A página do Instagram não respondeu.");
-    }
-    const visibleThreads = await readVisibleInbox();
-    return {
-      // The Instagram API may return HTTP 200 with a stale/incomplete inbox.
-      // Keep it as the primary source, but append the recent visible rows so
-      // a new keyword cannot be missed merely because the API lagged behind.
-      primary: [
-        ...(Array.isArray(response.primary) ? response.primary : []),
-        ...visibleThreads
-      ],
-      general: Array.isArray(response.general) ? response.general : [],
-      viewerId: String(response.viewerId || ""),
-      transport: visibleThreads.length
-        ? "instagram-page+visible-inbox"
-        : "instagram-page"
-    };
-  } catch (pageError) {
-    try {
-      const [primary, general] = await Promise.all([
-        fetchDirectInboxFolder(0, csrfToken),
-        fetchDirectInboxFolder(1, csrfToken)
-      ]);
-      return {
-        primary,
-        general,
-        viewerId: "",
-        transport: "extension-background-fallback",
-        pageError: pageError?.message || String(pageError)
-      };
-    } catch (backgroundError) {
-      const visibleThreads = await readVisibleInbox();
-      if (!visibleThreads.length) throw backgroundError;
-      return {
-        primary: visibleThreads,
-        general: [],
-        viewerId: "",
-        transport: "instagram-visible-inbox",
-        pageError: pageError?.message || String(pageError),
-        backgroundError: backgroundError?.message || String(backgroundError)
-      };
-    }
+  const [pageResult, visibleThreads, unifiedResult, primaryResult, generalResult] =
+    await Promise.all([
+      pagePromise.then(value => ({ ok: true, value }), error => ({ ok: false, error })),
+      readVisibleInbox(),
+      fetchDirectInboxUnified(csrfToken)
+        .then(value => ({ ok: true, value }), error => ({ ok: false, error })),
+      fetchDirectInboxFolder(0, csrfToken)
+        .then(value => ({ ok: true, value }), error => ({ ok: false, error })),
+      fetchDirectInboxFolder(1, csrfToken)
+        .then(value => ({ ok: true, value }), error => ({ ok: false, error }))
+    ]);
+
+  const page = pageResult.ok ? pageResult.value : {};
+  const unified = unifiedResult.ok ? unifiedResult.value : {};
+  const backgroundPrimary = primaryResult.ok ? primaryResult.value : {};
+  const backgroundGeneral = generalResult.ok ? generalResult.value : {};
+  const primary = mergeDirectThreadCollections(
+    page.primary,
+    visibleThreads,
+    unified.threads,
+    backgroundPrimary.threads
+  );
+  const general = mergeDirectThreadCollections(page.general, backgroundGeneral.threads);
+  const backgroundSucceeded = unifiedResult.ok || primaryResult.ok || generalResult.ok;
+  if (!pageResult.ok && !backgroundSucceeded && !visibleThreads.length) {
+    throw new Error([
+      pageResult.error?.message,
+      unifiedResult.error?.message,
+      primaryResult.error?.message,
+      generalResult.error?.message
+    ].filter(Boolean).join("; ") || "Nenhuma fonte do Direct respondeu.");
   }
+
+  const transports = [];
+  if (pageResult.ok) transports.push("instagram-page");
+  if (visibleThreads.length) transports.push("visible-inbox");
+  const backgroundThreadCount = (unified.threads?.length || 0) +
+    (backgroundPrimary.threads?.length || 0) +
+    (backgroundGeneral.threads?.length || 0);
+  if (backgroundThreadCount || !pageResult.ok) transports.push("authenticated-background");
+  return {
+    primary,
+    general,
+    viewerId: String(
+      page.viewerId || unified.viewerId || backgroundPrimary.viewerId ||
+      backgroundGeneral.viewerId || ""
+    ),
+    transport: transports.join("+") || "failed",
+    diagnostics: {
+      page: pageResult.ok ? {
+        primary: Array.isArray(page.primary) ? page.primary.length : 0,
+        general: Array.isArray(page.general) ? page.general.length : 0
+      } : { error: pageResult.error?.message || String(pageResult.error) },
+      visible: visibleThreads.length,
+      unified: unifiedResult.ok
+        ? { threads: unified.threads?.length || 0, host: unified.host }
+        : { error: unifiedResult.error?.message || String(unifiedResult.error) },
+      primary: primaryResult.ok
+        ? { threads: backgroundPrimary.threads?.length || 0, host: backgroundPrimary.host }
+        : { error: primaryResult.error?.message || String(primaryResult.error) },
+      general: generalResult.ok
+        ? { threads: backgroundGeneral.threads?.length || 0, host: backgroundGeneral.host }
+        : { error: generalResult.error?.message || String(generalResult.error) }
+    }
+  };
 }
 
 const readDirectItemText = item => {
@@ -1240,34 +2093,90 @@ const readDirectItemTimestamp = item => {
   return Math.floor(numeric * 1000);
 };
 
-async function processDirectInbox(tabId, threads, bots, viewerId) {
+async function processDirectInboxNow(tabId, threads, bots, viewerId) {
+  const stored = await chrome.storage.local.get([
+    "flowsiChatbotSeenDirect",
+    "flowsiChatbotDirectBaselineReady",
+    CHATBOT_DIRECT_STATE_BY_VIEWER_KEY,
+    CHATBOT_DIRECT_ACTIVE_VIEWER_KEY,
+    CHATBOT_COMPLETED_ACTIONS_KEY,
+    "quickMessages"
+  ]);
   const {
     flowsiChatbotSeenDirect = [],
     flowsiChatbotDirectBaselineReady = false,
     flowsiChatbotCompletedActions = [],
     quickMessages = []
-  } =
-    await chrome.storage.local.get([
-      "flowsiChatbotSeenDirect",
-      "flowsiChatbotDirectBaselineReady",
-      "flowsiChatbotCompletedActions",
-      "quickMessages"
-    ]);
-  const seen = new Set((Array.isArray(flowsiChatbotSeenDirect)
+  } = stored;
+  const activeViewerId = normalizeInstagramViewerId(
+    stored?.[CHATBOT_DIRECT_ACTIVE_VIEWER_KEY]
+  );
+  // A missing realtime viewer ID must not create a second anonymous baseline.
+  // The realtime entry point resolves cookies first; this last fallback keeps
+  // an already known account stable during a transient cookie read failure.
+  const effectiveViewerId = normalizeInstagramViewerId(viewerId) || activeViewerId;
+  const viewerStateKey = effectiveViewerId || "__unknown__";
+  const stateByViewer = stored?.[CHATBOT_DIRECT_STATE_BY_VIEWER_KEY] &&
+    typeof stored[CHATBOT_DIRECT_STATE_BY_VIEWER_KEY] === "object"
+    ? { ...stored[CHATBOT_DIRECT_STATE_BY_VIEWER_KEY] }
+    : {};
+  const storedViewerState = stateByViewer[viewerStateKey];
+  const hasStoredViewerState = Boolean(
+    storedViewerState && typeof storedViewerState === "object"
+  );
+  const accountChanged = Boolean(
+    effectiveViewerId && activeViewerId && effectiveViewerId !== activeViewerId
+  );
+  // Keep the legacy aliases usable by older extension builds and by an
+  // explicit local reset, but never import account A's watermark into a newly
+  // detected account B.
+  const legacyResetRequested = hasStoredViewerState &&
+    stored.flowsiChatbotDirectBaselineReady === false &&
+    Array.isArray(stored.flowsiChatbotSeenDirect) &&
+    stored.flowsiChatbotSeenDirect.length === 0;
+  const canUseLegacyState = legacyResetRequested || (
+    !hasStoredViewerState && (!accountChanged || !activeViewerId)
+  );
+  const baselineReady = legacyResetRequested
+    ? false
+    : hasStoredViewerState
+      ? storedViewerState.baselineReady === true
+      : canUseLegacyState && flowsiChatbotDirectBaselineReady === true;
+  const initialSeen = legacyResetRequested || !hasStoredViewerState && canUseLegacyState
     ? flowsiChatbotSeenDirect
-    : []).map(String));
+    : storedViewerState?.seen;
+  const seen = new Set((Array.isArray(initialSeen) ? initialSeen : []).map(String));
   const completedActions = new Set(
     (Array.isArray(flowsiChatbotCompletedActions)
       ? flowsiChatbotCompletedActions
       : []).map(String)
   );
+  const persistCompletedActions = () => persistCompletedActionsUnion(completedActions);
+  const persistDirectState = async (ready = true) => {
+    const seenValues = [...seen].slice(-CHATBOT_SEEN_LIMIT);
+    stateByViewer[viewerStateKey] = {
+      seen: seenValues,
+      baselineReady: ready === true,
+      updatedAt: Date.now()
+    };
+    const values = {
+      [CHATBOT_DIRECT_STATE_BY_VIEWER_KEY]: stateByViewer,
+      // Compatibility aliases always mirror the currently processed viewer.
+      flowsiChatbotSeenDirect: seenValues,
+      flowsiChatbotDirectBaselineReady: ready === true
+    };
+    if (effectiveViewerId) {
+      values[CHATBOT_DIRECT_ACTIVE_VIEWER_KEY] = effectiveViewerId;
+    }
+    await chrome.storage.local.set(values);
+  };
   const candidatesById = new Map();
   for (const thread of threads) {
     const items = Array.isArray(thread?.items) ? thread.items.slice(0, 10) : [];
     for (const item of items) {
       const itemId = String(item?.item_id || item?.client_context || "").trim();
       const senderId = String(item?.user_id || item?.sender_id || "").trim();
-      if (!itemId || !senderId || senderId === String(viewerId || "")) continue;
+      if (!itemId || !senderId || senderId === effectiveViewerId) continue;
       const text = readDirectItemText(item);
       if (!text) continue;
       const sender = (Array.isArray(thread?.users) ? thread.users : []).find(user =>
@@ -1278,7 +2187,14 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
       candidatesById.set(itemId, {
         itemId,
         threadId: String(thread?.thread_id || ""),
+        trustedThreadId: String(thread?._flowsiTrustedThreadId || "") ===
+          String(thread?.thread_id || "")
+          ? String(thread?._flowsiTrustedThreadId || "")
+          : "",
         username,
+        contactName: normalizeChatbotContactName(
+          sender?.full_name || sender?.fullName || sender?.display_name || sender?.name
+        ),
         text,
         timestamp: readDirectItemTimestamp(item)
       });
@@ -1293,22 +2209,28 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
     errors: 0,
     skippedSeen: 0,
     lastError: null,
-    lastAttempt: null
+    lastAttempt: null,
+    lastSuccess: null
   };
 
   // Establish a watermark without swallowing a trigger that arrived moments
   // before the first poll after the bot was created or the extension reloaded.
   let candidatesToProcess = candidates;
-  if (!flowsiChatbotDirectBaselineReady) {
+  if (!baselineReady) {
     const cutoff = Date.now() - DIRECT_BASELINE_RECENT_WINDOW_MS;
     const latestMatchingByUser = new Map();
-    for (const candidate of candidates) {
-      const isRecent = candidate.timestamp > 0 && candidate.timestamp >= cutoff;
-      const matches = directBots.some(bot => botMatchesText(bot, candidate.text));
-      if (!isRecent || !matches) continue;
-      const previous = latestMatchingByUser.get(candidate.username);
-      if (!previous || candidate.timestamp > previous.timestamp) {
-        latestMatchingByUser.set(candidate.username, candidate);
+    // On a real account switch the first snapshot is history, even when some
+    // items happen to be recent. Baseline it entirely so account B never
+    // receives responses for messages collected while account A was active.
+    if (!accountChanged || hasStoredViewerState) {
+      for (const candidate of candidates) {
+        const isRecent = candidate.timestamp > 0 && candidate.timestamp >= cutoff;
+        const matches = directBots.some(bot => botMatchesText(bot, candidate.text));
+        if (!isRecent || !matches) continue;
+        const previous = latestMatchingByUser.get(candidate.username);
+        if (!previous || candidate.timestamp > previous.timestamp) {
+          latestMatchingByUser.set(candidate.username, candidate);
+        }
       }
     }
     candidatesToProcess = [...latestMatchingByUser.values()];
@@ -1316,10 +2238,7 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
     for (const candidate of candidates) {
       if (!recentIds.has(candidate.itemId)) seen.add(candidate.itemId);
     }
-    await chrome.storage.local.set({
-      flowsiChatbotDirectBaselineReady: true,
-      flowsiChatbotSeenDirect: [...seen].slice(-CHATBOT_SEEN_LIMIT)
-    });
+    await persistDirectState(true);
   }
 
   for (const candidate of candidatesToProcess
@@ -1344,18 +2263,41 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
       const template = findTemplate(quickMessages, bot);
       const botKey = String(bot?.id || bot?.template || "bot");
       const dmActionKey = `${candidate.itemId}:${botKey}:direct-dm`;
+      const labelActionKey = `${candidate.itemId}:${botKey}:label:${String(bot?.labelColumnId || "")}`;
       try {
         let sendResult = null;
+        let labelResult = null;
         if (!template?.content) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
+        const candidateContact = createChatbotContact(
+          candidate.username,
+          candidate.contactName
+        );
+        const directMessage = personalizeChatbotMessage(
+          template.content,
+          candidateContact
+        );
         if (!completedActions.has(dmActionKey)) {
           sendResult = await sendMessageToInstagram(
             candidate.username,
-            template.content,
+            directMessage,
             tabId,
-            candidate.threadId
+            candidate.threadId,
+            effectiveViewerId,
+            candidate.trustedThreadId
           );
           completedActions.add(dmActionKey);
+          // The Instagram acknowledgement is the exactly-once boundary. Save
+          // it before diagnostics or the next item so a suspended MV3 worker
+          // cannot resend an already acknowledged Direct.
+          await persistCompletedActions();
         }
+        labelResult = await applyChatbotLabelForBot(
+          bot,
+          candidateContact,
+          labelActionKey,
+          completedActions,
+          persistCompletedActions
+        );
         await appendChatbotDiagnostic({
           status: "sent",
           source: "direct-or-story",
@@ -1363,8 +2305,15 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
           username: candidate.username,
           template: bot.template,
           transport: sendResult?.transport || "already-completed",
-          matchedText: candidate.text.slice(0, 120)
+          matchedText: candidate.text.slice(0, 120),
+          labelColumnId: labelResult?.columnId || null
         });
+        stats.lastSuccess = {
+          username: candidate.username,
+          threadId: candidate.threadId,
+          transport: sendResult?.transport || "already-completed",
+          labelColumnId: labelResult?.columnId || null
+        };
         stats.sent += 1;
       } catch (error) {
         allSucceeded = false;
@@ -1382,33 +2331,177 @@ async function processDirectInbox(tabId, threads, bots, viewerId) {
     }
     if (allSucceeded) seen.add(candidate.itemId);
   }
-  await chrome.storage.local.set({
-    flowsiChatbotSeenDirect: [...seen].slice(-CHATBOT_SEEN_LIMIT),
-    flowsiChatbotCompletedActions: [...completedActions].slice(-1000)
-  });
+  await persistDirectState(true);
+  await persistCompletedActions();
   return stats;
 }
 
-async function checkNotifications() {
-  const now = Date.now();
-  const { lastRunTime = 0 } = await chrome.storage.local.get("lastRunTime");
-  if (now - lastRunTime < NOTIFICATION_MIN_INTERVAL_MS) return;
-  await chrome.storage.local.set({ lastRunTime: now });
+function processDirectInbox(tabId, threads, bots, viewerId) {
+  const run = chatbotDirectProcessingQueue
+    .catch(() => null)
+    .then(() => processDirectInboxNow(tabId, threads, bots, viewerId));
+  chatbotDirectProcessingQueue = run.catch(() => null);
+  return run;
+}
 
-  const tabId = await getInstagramTabId();
-  const bots = await getActiveChatbots();
-  if (!tabId || !bots.length) return;
-
-  const cookies = await getInstagramCookies().catch(() => ({}));
+const parseRealtimeValue = value => {
+  if (typeof value !== "string") return value;
   try {
-    const [notifications, directInbox] = await Promise.all([
-      (cookies.csrftoken ? fetchNotifications(cookies.csrftoken) : Promise.resolve([])).catch(error => {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+function realtimeThreadsFromMessage(message) {
+  const candidates = [
+    parseRealtimeValue(message?.thread),
+    parseRealtimeValue(message?.event),
+    parseRealtimeValue(message?.payload),
+    parseRealtimeValue(message?.serializedEvent)
+  ].filter(value => value && typeof value === "object");
+  const explicitThreads = Array.isArray(message?.threads)
+    ? message.threads.map(parseRealtimeValue).filter(Boolean)
+    : [];
+  const result = [];
+  for (const candidate of [...explicitThreads, ...candidates]) {
+    const thread = candidate?.thread && typeof candidate.thread === "object"
+      ? candidate.thread
+      : candidate;
+    if (Array.isArray(thread?.items) && (thread?.thread_id || thread?.threadId)) {
+      result.push(thread);
+      continue;
+    }
+    const eventId = String(
+      candidate?.eventId || candidate?.event_id || candidate?.item_id || message?.eventId || ""
+    ).trim();
+    const username = normalizeCrmKey(
+      candidate?.username || candidate?.user?.username || candidate?.sender?.username
+    );
+    const text = String(
+      candidate?.text || candidate?.message || candidate?.preview || candidate?.item?.text || ""
+    ).trim();
+    if (!eventId || !username || !text) continue;
+    const senderId = String(
+      candidate?.userId || candidate?.user_id || candidate?.senderId ||
+      candidate?.sender_id || candidate?.user?.pk || candidate?.sender?.pk || username
+    ).trim();
+    result.push({
+      thread_id: String(
+        candidate?.threadId || candidate?.thread_id || message?.threadId || `realtime:${username}`
+      ),
+      users: [{
+        pk: senderId,
+        username,
+        full_name: String(
+          candidate?.fullName || candidate?.full_name || candidate?.user?.full_name ||
+          candidate?.sender?.full_name || ""
+        ).trim()
+      }],
+      items: [{
+        item_id: eventId,
+        user_id: senderId,
+        text,
+        timestamp: candidate?.timestamp || candidate?.capturedAt || Date.now()
+      }]
+    });
+  }
+  return mergeDirectThreadCollections(result);
+}
+
+async function processChatbotRealtimeEvent(message, tabId) {
+  if (!Number.isInteger(tabId)) {
+    throw new Error("O evento em tempo real não informou a aba do Instagram.");
+  }
+  const threads = realtimeThreadsFromMessage(message);
+  if (!threads.length) {
+    // Older content scripts only emitted an eventId. Keep that installation
+    // operational by forcing the authenticated inbox read on the exact tab.
+    return checkNotifications({ force: true, preferredTabId: tabId });
+  }
+  const trustedThreadId = /^\d+$/.test(String(message?.trustedThreadId || "").trim())
+    ? String(message.trustedThreadId).trim()
+    : "";
+  const trustedThreads = threads.map(thread => ({
+    ...thread,
+    _flowsiTrustedThreadId: trustedThreadId &&
+      String(thread?.thread_id || "") === trustedThreadId
+      ? trustedThreadId
+      : String(thread?._flowsiTrustedThreadId || "")
+  }));
+  const bots = await getActiveChatbots();
+  if (!bots.length) return { status: "idle", threads: trustedThreads.length };
+  // Home-page toast events do not always carry the current account. Resolve
+  // the authenticated cookie identity before direction filtering and before
+  // choosing the per-account seen/baseline state.
+  const viewerId = await resolveChatbotViewerId(
+    message?.viewerId || message?.viewer_id || ""
+  );
+  const stats = await processDirectInbox(tabId, trustedThreads, bots, viewerId);
+  await appendChatbotDiagnostic({
+    status: stats.errors ? "error" : "processed",
+    source: "direct-realtime-event",
+    eventId: String(message?.eventId || ""),
+    threads: trustedThreads.length,
+    candidates: stats.candidates,
+    matched: stats.matched,
+    sent: stats.sent,
+    skippedSeen: stats.skippedSeen,
+    error: stats.lastError || null
+  });
+  return {
+    status: stats.errors ? "error" : "processed",
+    threads: trustedThreads.length,
+    direct: stats
+  };
+}
+
+async function checkNotifications({ force = false, preferredTabId = null } = {}) {
+  if (chatbotNotificationCheckInFlight) {
+    if (!Number.isInteger(preferredTabId)) return chatbotNotificationCheckInFlight;
+    // Do not lose an event that arrives during the periodic polling run. Once
+    // that run releases the lock, immediately read the tab that emitted it.
+    const activeRun = chatbotNotificationCheckInFlight;
+    return activeRun.catch(() => null).then(() => checkNotifications({
+      force: true,
+      preferredTabId
+    }));
+  }
+  const currentRun = (async () => {
+    const now = Date.now();
+    const { lastRunTime = 0 } = await chrome.storage.local.get("lastRunTime");
+    if (!force && now - lastRunTime < NOTIFICATION_MIN_INTERVAL_MS) return;
+    await chrome.storage.local.set({ lastRunTime: now });
+
+    const tabId = await getInstagramTabId(preferredTabId);
+    const bots = await getActiveChatbots();
+    if (!tabId || !bots.length) {
+      await chrome.storage.local.set({
+        flowsiChatbotLastNotificationCheck: {
+          at: new Date().toISOString(),
+          status: "idle",
+          transport: "not-started",
+          total: 0,
+          followers: 0,
+          types: [],
+          error: !tabId
+            ? "Nenhuma aba do Instagram ficou disponível para o chatbot."
+            : "Nenhum chatbot ativo foi encontrado."
+        }
+      });
+      return;
+    }
+
+    const cookies = await getInstagramCookies().catch(() => ({}));
+    try {
+      const [notificationResult, directInbox] = await Promise.all([
+      fetchNotificationsFromInstagramTab(tabId, cookies.csrftoken || "").catch(error => {
         appendChatbotDiagnostic({
           status: "error",
           source: "notifications-read",
           error: error?.message || String(error)
         });
-        return [];
+        return { notifications: [], transport: "failed", error: error?.message || String(error) };
       }),
       fetchDirectInboxFromInstagramTab(tabId, cookies.csrftoken || "").catch(error => {
         appendChatbotDiagnostic({
@@ -1424,50 +2517,147 @@ async function checkNotifications() {
           error: error?.message || String(error)
         };
       })
-    ]);
-    if (cookies.csrftoken) {
-      await processInstagramNotifications(tabId, notifications, bots, cookies.csrftoken);
-    }
-    const uniqueThreads = [...new Map(
-      [...directInbox.primary, ...directInbox.general]
-        .map(thread => [String(thread?.thread_id || ""), thread])
-    ).values()];
-    await chrome.storage.local.set({
-      flowsiChatbotLastInboxCheck: {
-        at: new Date().toISOString(),
-        status: directInbox.error ? "error" : "ok",
-        transport: directInbox.transport,
-        primaryThreads: directInbox.primary.length,
-        generalThreads: directInbox.general.length,
-        totalThreads: uniqueThreads.length,
-        error: directInbox.error || null
+      ]);
+      const notifications = Array.isArray(notificationResult?.notifications)
+        ? notificationResult.notifications
+        : [];
+      await chrome.storage.local.set({
+        flowsiChatbotLastNotificationCheck: {
+          at: new Date().toISOString(),
+          status: notificationResult?.error ? "error" : "ok",
+          transport: notificationResult?.transport || "unknown",
+          total: notifications.length,
+          followers: notifications.filter(isFollowerNotification).length,
+          types: [...new Set(notifications.map(notificationType).filter(Boolean))].slice(0, 20),
+          error: notificationResult?.error || null
+        }
+      });
+      if (notifications.length) {
+        await processInstagramNotifications(tabId, notifications, bots, cookies.csrftoken || "");
       }
-    });
-    const direct = await processDirectInbox(
-      tabId,
-      uniqueThreads,
-      bots,
-      directInbox.viewerId || cookies.ds_user_id
-    );
-    return {
-      notifications: notifications.length,
-      directThreads: uniqueThreads.length,
-      direct
-    };
-  } catch (error) {
-    console.error("Notification check failed:", error);
-    await appendChatbotDiagnostic({
-      status: "error",
-      source: "trigger-check",
-      error: error?.message || String(error)
-    });
-    throw error;
+      const uniqueThreads = mergeDirectThreadCollections(
+        directInbox.primary,
+        directInbox.general
+      );
+      await chrome.storage.local.set({
+        flowsiChatbotLastInboxCheck: {
+          at: new Date().toISOString(),
+          status: directInbox.error ? "error" : "ok",
+          transport: directInbox.transport,
+          primaryThreads: directInbox.primary.length,
+          generalThreads: directInbox.general.length,
+          totalThreads: uniqueThreads.length,
+          error: directInbox.error || null,
+          diagnostics: directInbox.diagnostics || null
+        }
+      });
+      const directViewerId = await resolveChatbotViewerId(
+        directInbox.viewerId,
+        cookies
+      );
+      const direct = await processDirectInbox(
+        tabId,
+        uniqueThreads,
+        bots,
+        directViewerId
+      );
+      return {
+        notifications: notifications.length,
+        notificationTransport: notificationResult?.transport || "unknown",
+        followerNotifications: notifications.filter(isFollowerNotification).length,
+        notificationTypes: [...new Set(notifications.map(notificationType).filter(Boolean))].slice(0, 20),
+        directThreads: uniqueThreads.length,
+        direct
+      };
+    } catch (error) {
+      console.error("Notification check failed:", error);
+      await appendChatbotDiagnostic({
+        status: "error",
+        source: "trigger-check",
+        error: error?.message || String(error)
+      });
+      throw error;
+    }
+  })();
+  chatbotNotificationCheckInFlight = currentRun;
+  try {
+    return await currentRun;
+  } finally {
+    if (chatbotNotificationCheckInFlight === currentRun) {
+      chatbotNotificationCheckInFlight = null;
+    }
   }
 }
 
-chrome.alarms.create("checkNotif", { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === "checkNotif") checkNotifications();
+const CHATBOT_ALARM_NAME = "checkNotif";
+const CHATBOT_ALARM_PERIOD_MINUTES = 1;
+
+async function ensureChatbotAlarm() {
+  if (typeof chrome.alarms?.get !== "function") {
+    chrome.alarms?.create?.(CHATBOT_ALARM_NAME, {
+      periodInMinutes: CHATBOT_ALARM_PERIOD_MINUTES
+    });
+    return;
+  }
+  const existing = await chrome.alarms.get(CHATBOT_ALARM_NAME);
+  if (existing?.periodInMinutes === CHATBOT_ALARM_PERIOD_MINUTES) return;
+  await Promise.resolve(chrome.alarms.create(CHATBOT_ALARM_NAME, {
+    periodInMinutes: CHATBOT_ALARM_PERIOD_MINUTES
+  }));
+}
+
+const logChatbotWakeError = (reason, error) => {
+  console.error(`Chatbot check failed (${reason}):`, error);
+};
+
+const requestChatbotCheck = (reason, options = {}) => checkNotifications(options)
+  .catch(error => {
+    logChatbotWakeError(reason, error);
+    return null;
+  });
+
+ensureChatbotAlarm().catch(error => logChatbotWakeError("alarm-setup", error));
+
+chrome.alarms?.onAlarm?.addListener(alarm => {
+  if (alarm?.name !== CHATBOT_ALARM_NAME) return;
+  checkNotifications().catch(error => logChatbotWakeError("alarm", error));
+});
+
+chrome.runtime?.onStartup?.addListener(() => {
+  ensureChatbotAlarm().catch(error => logChatbotWakeError("startup-alarm", error));
+  requestChatbotCheck("startup", { force: true });
+});
+
+chrome.runtime?.onInstalled?.addListener(() => {
+  ensureChatbotAlarm().catch(error => logChatbotWakeError("installed-alarm", error));
+  requestChatbotCheck("installed", { force: true });
+});
+
+chrome.storage?.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== "local" || !Object.prototype.hasOwnProperty.call(changes || {}, "bots")) {
+    return;
+  }
+  requestChatbotCheck("bots-changed", { force: true });
+});
+
+chrome.tabs?.onUpdated?.addListener((_tabId, changeInfo, tab) => {
+  const url = String(changeInfo?.url || tab?.url || "");
+  const becameReady = changeInfo?.status === "complete" ||
+    (typeof changeInfo?.url === "string" && (!tab?.status || tab.status === "complete"));
+  if (!becameReady || !isUsableInstagramTab({ ...tab, url })) return;
+  requestChatbotCheck("instagram-tab-ready", { force: true });
+});
+
+chrome.tabs?.onActivated?.addListener(activeInfo => {
+  if (!Number.isInteger(activeInfo?.tabId) || typeof chrome.tabs?.get !== "function") return;
+  chrome.tabs.get(activeInfo.tabId)
+    .then(tab => {
+      if (isUsableInstagramTab(tab)) {
+        return requestChatbotCheck("instagram-tab-activated", { force: true });
+      }
+      return null;
+    })
+    .catch(error => logChatbotWakeError("instagram-tab-activated", error));
 });
 
 console.log("Flowsi background loaded at", new Date().toISOString());

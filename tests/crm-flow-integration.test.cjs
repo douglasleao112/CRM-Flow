@@ -22,7 +22,10 @@ assert.equal(manifest.background.service_worker, "crm-background.js");
 assert.equal(manifest.background.type, "module");
 assert.ok(manifest.host_permissions.includes("https://web.whatsapp.com/*"));
 assert.ok(manifest.host_permissions.includes("https://mail.google.com/*"));
-assert.ok(manifest.host_permissions.includes("https://www.instagram.com/*"));
+assert.ok(
+  manifest.host_permissions.includes("*://*.instagram.com/*"),
+  "CRM Flow must authorize Instagram web, API, and edge-chat subdomains"
+);
 assert.ok(manifest.permissions.includes("cookies"));
 assert.ok(manifest.content_scripts.some(entry =>
   entry.matches.includes("https://www.instagram.com/*") && entry.world === "MAIN"
@@ -37,8 +40,8 @@ assert.match(popup, /id="instagramPanel"/);
 assert.match(popup, /Abrir Instagram/);
 assert.doesNotMatch(popup, /CRM Flow para Instagram/);
 assert.match(popup, /class="instagram-panel-icon"/);
-assert.equal((popup.match(/<div><strong>/g) || []).length, 3);
-assert.match(popup, /Kanban do Direct/);
+assert.equal((popup.match(/<div>\s*<strong>/g) || []).length, 1);
+assert.match(popup, /CRM para Instagram/);
 assert.match(popupScript, /setPopupTab\("instagram"\)/);
 assert.match(popupScript, /https:\/\/www\.instagram\.com\/direct\/inbox\//);
 assert.doesNotMatch(

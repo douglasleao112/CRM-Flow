@@ -10,12 +10,14 @@
   "content_scripts": [
     {
       "js": [
+        "src/pages/content/kanban-transition.js",
         "src/pages/content/contact-scraper-main.js"
       ],
       "matches": [
         "https://www.instagram.com/*"
       ],
-      "world": "MAIN"
+      "world": "MAIN",
+      "run_at": "document_start"
     },
     {
       "css": [
@@ -59,7 +61,7 @@
     "activeTab"
   ],
   "update_url": "https://clients2.google.com/service/update2/crx",
-  "version": "2026.6.174",
+  "version": "2026.6.196",
   "web_accessible_resources": [
     {
       "matches": [

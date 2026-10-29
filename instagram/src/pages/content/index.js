@@ -459,7 +459,7 @@ function installManualContactFormHandler() {
 function installNotebookProfileCardSync() {
   if (window.__flowsiNotebookProfileCardSyncInstalled) return;
   window.__flowsiNotebookProfileCardSyncInstalled = true;
-  document.documentElement.setAttribute("data-flowsi-profile-sync-version", "2026.6.174");
+  document.documentElement.setAttribute("data-flowsi-profile-sync-version", "2026.6.180");
 
   let syncTimer = null;
   let lastConfirmedSignature = "";
@@ -1489,6 +1489,84 @@ function installKanbanMenuToggle() {
   // an extra document-level click interception.
 }
 
+const FLOWSI_KANBAN_TRANSITION_ATTRIBUTE = "data-flowsi-kanban-transition";
+const FLOWSI_KANBAN_TRANSITION_STYLE_ID = "flowsi-kanban-transition-style";
+
+function showKanbanNavigationCurtain() {
+  const root = document.documentElement;
+  root.setAttribute(FLOWSI_KANBAN_TRANSITION_ATTRIBUTE, "pending");
+  if (document.getElementById(FLOWSI_KANBAN_TRANSITION_STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = FLOWSI_KANBAN_TRANSITION_STYLE_ID;
+  style.textContent = `
+    html[${FLOWSI_KANBAN_TRANSITION_ATTRIBUTE}="pending"],
+    html[${FLOWSI_KANBAN_TRANSITION_ATTRIBUTE}="pending"] body {
+      background: #fff !important;
+    }
+    html[${FLOWSI_KANBAN_TRANSITION_ATTRIBUTE}="pending"] body {
+      overflow: hidden !important;
+    }
+    html[${FLOWSI_KANBAN_TRANSITION_ATTRIBUTE}="pending"] body > * {
+      visibility: hidden !important;
+    }
+    html[${FLOWSI_KANBAN_TRANSITION_ATTRIBUTE}="pending"] body > #flowsi-nav-bar,
+    html[${FLOWSI_KANBAN_TRANSITION_ATTRIBUTE}="pending"] body > #flowsi-nav-bar * {
+      visibility: visible !important;
+    }
+    html[${FLOWSI_KANBAN_TRANSITION_ATTRIBUTE}="pending"] #flowsi-nav-bar .flowsi-overlay {
+      background: #fff !important;
+      opacity: 1 !important;
+    }
+  `;
+  root.appendChild(style);
+}
+
+function clearKanbanNavigationCurtain() {
+  document.documentElement.removeAttribute(FLOWSI_KANBAN_TRANSITION_ATTRIBUTE);
+  document.getElementById(FLOWSI_KANBAN_TRANSITION_STYLE_ID)?.remove();
+}
+
+function isKanbanSurfaceVisible() {
+  return [...document.querySelectorAll(".flowsi-overlay, .flowsi-board")].some(element => {
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      Number.parseFloat(style.opacity || "1") > 0 &&
+      rect.width > 0 &&
+      rect.height > 0;
+  });
+}
+
+function navigateToInstagramInbox() {
+  const inboxLink = [...document.querySelectorAll("a[href]")].find(link => {
+    try {
+      return new URL(link.href, window.location.href).pathname === "/direct/inbox/";
+    } catch {
+      return false;
+    }
+  });
+  if (!inboxLink) return false;
+  inboxLink.click();
+  return true;
+}
+
+function openPendingKanbanAfterNavigation() {
+  const startedAt = Date.now();
+  const waitForInbox = () => {
+    if (window.location.pathname === "/direct/inbox/") {
+      openPendingKanbanOnInbox();
+      return;
+    }
+    if (Date.now() - startedAt < 1500) {
+      setTimeout(waitForInbox, 50);
+      return;
+    }
+    window.location.assign("https://www.instagram.com/direct/inbox/");
+  };
+  waitForInbox();
+}
+
 function extendKanbanSyncTimeout() {
   if (window.__flowsiKanbanSyncTimeoutExtended) return;
   window.__flowsiKanbanSyncTimeoutExtended = true;
@@ -1601,13 +1679,20 @@ function installGlobalSidebarNavigation() {
     event.stopPropagation();
     event.stopImmediatePropagation();
     sessionStorage.setItem("flowsiOpenKanbanAfterInbox", String(Date.now()));
+    showKanbanNavigationCurtain();
     chrome.storage.local.set({ flowsiOpenKanbanAfterInbox: Date.now() });
-    window.location.assign("https://www.instagram.com/direct/inbox/");
+    if (navigateToInstagramInbox()) {
+      openPendingKanbanAfterNavigation();
+    } else {
+      window.location.assign("https://www.instagram.com/direct/inbox/");
+    }
   }, true);
 }
 
 function openPendingKanbanOnInbox() {
   if (window.location.pathname !== "/direct/inbox/") return;
+  if (window.__flowsiPendingKanbanOpening) return;
+  window.__flowsiPendingKanbanOpening = true;
   chrome.storage.local.get(["flowsiOpenKanbanAfterInbox"], stored => {
     const sessionRequestedAt = Number(
       sessionStorage.getItem("flowsiOpenKanbanAfterInbox") || 0
@@ -1617,23 +1702,46 @@ function openPendingKanbanOnInbox() {
       Number(stored.flowsiOpenKanbanAfterInbox || 0)
     );
     if (!requestedAt || Date.now() - requestedAt > 120000) {
+      window.__flowsiPendingKanbanOpening = false;
       if (requestedAt) chrome.storage.local.remove("flowsiOpenKanbanAfterInbox");
       sessionStorage.removeItem("flowsiOpenKanbanAfterInbox");
+      clearKanbanNavigationCurtain();
       return;
     }
 
     const startedAt = Date.now();
+    const finishTransition = () => {
+      window.__flowsiPendingKanbanOpening = false;
+      sessionStorage.removeItem("flowsiOpenKanbanAfterInbox");
+      chrome.storage.local.remove("flowsiOpenKanbanAfterInbox");
+      clearKanbanNavigationCurtain();
+    };
+    const releaseWhenBoardIsReady = () => {
+      if (isKanbanSurfaceVisible()) {
+        finishTransition();
+        return;
+      }
+      if (Date.now() - startedAt < 15000) {
+        setTimeout(releaseWhenBoardIsReady, 50);
+        return;
+      }
+      finishTransition();
+    };
     const openWhenReady = () => {
       const button = [...document.querySelectorAll("#flowsi-nav-bar .flowsi-sidebar button")]
         .find(candidate => /^kanban crm$/i.test(
           String(candidate.textContent || "").replace(/\s+/g, " ").trim()
         ));
       if (!button) {
-        if (Date.now() - startedAt < 15000) setTimeout(openWhenReady, 150);
+        if (Date.now() - startedAt < 15000) {
+          setTimeout(openWhenReady, 150);
+        } else {
+          finishTransition();
+        }
         return;
       }
-      sessionStorage.removeItem("flowsiOpenKanbanAfterInbox");
-      chrome.storage.local.remove("flowsiOpenKanbanAfterInbox", () => button.click());
+      button.click();
+      releaseWhenBoardIsReady();
     };
     openWhenReady();
   });
@@ -1864,7 +1972,51 @@ function installReliableChatbotSender() {
     .map(part => part.trim().split("="))
     .find(([key]) => key === name)?.[1] || "";
 
-  const sendDirect = async (username, message) => {
+  const sendViaMqtt = (
+    threadId,
+    text,
+    viewerId,
+    clientContext,
+    deliveryId = ""
+  ) => new Promise((resolve, reject) => {
+    const requestId = String(deliveryId || "").trim() ||
+      `flowsi-chatbot-fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", onResult);
+      reject(new Error("O canal MQTT não confirmou a publicação."));
+    }, 12000);
+    function onResult(event) {
+      if (event.source !== window) return;
+      const result = event.data || {};
+      if (result.type !== "FLOWSI_DISPATCH_DM_RESULT" || result.request_id !== requestId) return;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", onResult);
+      if (result.success) resolve(result);
+      else {
+        const error = new Error(result.error || "O canal MQTT recusou a mensagem.");
+        error.deliveryAttempted = Boolean(result.delivery_attempted);
+        reject(error);
+      }
+    }
+    window.addEventListener("message", onResult);
+    window.postMessage({
+      type: "INJECT_DISPATCH_DM_REQUEST_V5",
+      request_id: requestId,
+      client_context: String(clientContext || ""),
+      thread_id: threadId,
+      viewer_id: viewerId,
+      text,
+      debug: false
+    }, "*");
+  });
+
+  const sendDirect = async (
+    username,
+    message,
+    existingThreadId = "",
+    viewerIdHint = "",
+    deliveryId = ""
+  ) => {
     const normalizedUsername = String(username || "").trim().toLowerCase().replace(/^@+/, "");
     const text = String(message || "").trim();
     if (!/^[a-z0-9._]{1,30}$/.test(normalizedUsername) || !text) {
@@ -1874,39 +2026,86 @@ function installReliableChatbotSender() {
       accept: "*/*",
       "x-ig-app-id": "936619743392459",
       "x-asbd-id": "129477",
+      "x-instagram-ajax": "1",
       "x-csrftoken": readCookie("csrftoken"),
       "x-requested-with": "XMLHttpRequest"
     };
-    const profileResponse = await fetch(
-      `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(normalizedUsername)}`,
-      { credentials: "include", cache: "no-store", headers }
-    );
-    if (!profileResponse.ok) {
-      throw new Error(`Não foi possível consultar @${normalizedUsername} (HTTP ${profileResponse.status}).`);
-    }
-    const profilePayload = await profileResponse.json();
-    const user = profilePayload?.data?.user;
-    const userId = String(user?.id || user?.pk || "");
-    if (!userId) throw new Error(`O perfil @${normalizedUsername} não foi encontrado.`);
-
-    const threadResponse = await fetch(
-      "https://i.instagram.com/api/v1/direct_v2/create_group_thread/",
-      {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          ...headers,
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: new URLSearchParams({ recipient_users: `["${userId}"]` }).toString()
+    const hintedThreadId = /^\d+$/.test(String(existingThreadId || ""))
+      ? String(existingThreadId)
+      : "";
+    let user = null;
+    let profileFailure = "";
+    try {
+      const profileResponse = await fetch(
+        `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(normalizedUsername)}`,
+        { credentials: "include", cache: "no-store", headers }
+      );
+      if (!profileResponse.ok) {
+        throw new Error(`HTTP ${profileResponse.status}`);
       }
-    );
-    const threadPayload = await threadResponse.json().catch(() => ({}));
-    const threadId = String(threadPayload?.thread_id || "");
-    if (!threadResponse.ok || !threadId) {
-      throw new Error(threadPayload?.message || "Não foi possível criar ou localizar a conversa.");
+      const profilePayload = await profileResponse.json();
+      user = profilePayload?.data?.user || null;
+    } catch (error) {
+      profileFailure = error?.message || String(error);
+      if (!hintedThreadId) {
+        throw new Error(`Não foi possível consultar @${normalizedUsername} (${profileFailure}).`);
+      }
     }
-    const clientContext = `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
+    const userId = String(user?.id || user?.pk || "");
+    let threadId = hintedThreadId;
+    if (!threadId) {
+      if (!userId) throw new Error(`O perfil @${normalizedUsername} não foi encontrado.`);
+      const threadResponse = await fetch(
+        "https://i.instagram.com/api/v1/direct_v2/create_group_thread/",
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            ...headers,
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: new URLSearchParams({ recipient_users: `["${userId}"]` }).toString()
+        }
+      );
+      const threadPayload = await threadResponse.json().catch(() => ({}));
+      threadId = String(threadPayload?.thread_id || threadPayload?.thread?.thread_id || "");
+      if (!threadResponse.ok || !threadId) {
+        throw new Error(threadPayload?.message || "Não foi possível criar ou localizar a conversa.");
+      }
+    }
+    const viewerId = String(
+      (/^\d+$/.test(String(viewerIdHint || "")) ? viewerIdHint : "") || user?.viewer_id || ""
+    );
+    const transportFailures = [],
+      clientContext = `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
+    if (viewerId) {
+      try {
+        const result = await sendViaMqtt(
+          threadId,
+          text,
+          viewerId,
+          clientContext,
+          deliveryId
+        );
+        return {
+          success: true,
+          status: "sent",
+          threadId,
+          transport: result?.transport || "instagram-mqtt-fallback"
+        };
+      } catch (error) {
+        transportFailures.push(`MQTT: ${error?.message || error}`);
+        if (error?.deliveryAttempted) {
+          const deliveryError = new Error(
+            "O envio MQTT já foi publicado; os canais alternativos foram bloqueados para evitar mensagem duplicada."
+          );
+          deliveryError.deliveryAttempted = true;
+          throw deliveryError;
+        }
+      }
+    } else {
+      transportFailures.push("MQTT: conta conectada não identificada");
+    }
     const broadcastBody = new URLSearchParams({
       action: "send_item",
       send_attribution: "direct_thread",
@@ -1938,44 +2137,29 @@ function installReliableChatbotSender() {
       }
     }
 
-    // Instagram accounts do not all expose the broadcast endpoint. Keep the
-    // extension's existing MQTT transport as a compatibility fallback.
-    const viewerId = readCookie("ds_user_id");
-    if (!viewerId) {
-      throw new Error(
-        `O Instagram recusou o envio HTTP e não informou a conta conectada (${broadcastFailures.join("; ")}).`
-      );
-    }
-    window.postMessage({
-      type: "INJECT_DISPATCH_DM_REQUEST",
-      thread_id: threadId,
-      viewer_id: viewerId,
-      user: {
-        id: userId,
-        username: normalizedUsername,
-        profile_img: user?.profile_pic_url || "",
-        type: 2,
-        timestamp: Date.now()
-      },
-      text,
-      debug: false
-    }, "*");
-    return {
-      success: true,
-      status: "queued",
-      threadId,
-      transport: "mqtt-fallback",
-      broadcastFailures
-    };
+    throw new Error(
+      `Nenhum canal confirmou o envio (${[
+        ...transportFailures,
+        ...broadcastFailures,
+        profileFailure ? `perfil: ${profileFailure}` : ""
+      ].filter(Boolean).join("; ")}).`
+    );
   };
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.action !== "flowsiChatbotSendMessage") return false;
-    sendDirect(message.username, message.message)
+    sendDirect(
+      message.username,
+      message.message,
+      message.threadId,
+      message.viewerId,
+      message.deliveryId
+    )
       .then(sendResponse)
       .catch(error => sendResponse({
         success: false,
-        error: error?.message || String(error)
+        error: error?.message || String(error),
+        deliveryAttempted: Boolean(error?.deliveryAttempted)
       }));
     return true;
   });
@@ -2026,6 +2210,27 @@ function installChatbotSourceControls() {
       color: var(--text);
     }
     .flowsi-chatbot-public-reply-wrap[hidden] { display: none !important; }
+    .flowsi-chatbot-label-control {
+      display: grid;
+      gap: 8px;
+      padding-top: 10px;
+      border-top: 1px solid var(--primary);
+    }
+    .flowsi-chatbot-label-select-wrap {
+      display: grid;
+      gap: 6px;
+      padding-left: 27px;
+    }
+    .flowsi-chatbot-label-select-wrap[hidden] { display: none !important; }
+    .flowsi-chatbot-label-select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 9px 10px;
+      border: 1px solid var(--primary);
+      border-radius: 5px;
+      background: var(--background-color-main);
+      color: var(--text);
+    }
     .flowsi-chatbot-sources-summary {
       margin-top: 8px;
       padding-top: 8px;
@@ -2081,17 +2286,38 @@ function installChatbotSourceControls() {
   document.documentElement.appendChild(style);
 
   const sourceLabel = bot => {
-    const explicit = ["triggerDirect", "triggerPostComments", "triggerNewFollowers"]
+    const explicit = ["triggerDirect", "triggerPostComments"]
       .some(key => typeof bot?.[key] === "boolean");
     const sources = [];
     if (explicit ? bot.triggerDirect : true) sources.push("Direct e Story");
     if (explicit ? bot.triggerPostComments : true) sources.push("Comentários em post");
-    if (explicit && bot.triggerNewFollowers) sources.push("Novos seguidores");
     return sources.length ? sources.join(" • ") : "Nenhuma origem selecionada";
   };
 
+  const populateLabelColumns = (select, columns, selectedColumnId = "") => {
+    if (!select) return;
+    const customColumns = (Array.isArray(columns) ? columns : [])
+      .filter(column => column && String(column.id || "") !== "all-chats");
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = customColumns.length
+      ? "Selecione uma etiqueta"
+      : "Crie uma coluna no Kanban primeiro";
+    select.appendChild(placeholder);
+    for (const column of customColumns) {
+      const option = document.createElement("option");
+      option.value = String(column.id || "");
+      option.textContent = String(column.title || column.name || "Sem título");
+      option.selected = option.value === String(selectedColumnId || "");
+      select.appendChild(option);
+    }
+  };
+
   const openBotEditor = botIndex => {
-    chrome.storage.local.get(["bots", "quickMessages"], ({ bots = [], quickMessages = [] }) => {
+    chrome.storage.local.get(
+      ["bots", "quickMessages", "kanbanColumns"],
+      ({ bots = [], quickMessages = [], kanbanColumns = [] }) => {
       const bot = bots[botIndex];
       if (!bot) return;
       const section = document.querySelector(".flowsi-chatbot-section");
@@ -2102,7 +2328,7 @@ function installChatbotSourceControls() {
         item.style.removeProperty("display");
         delete item.dataset.flowsiHiddenByEditor;
       });
-      const explicit = ["triggerDirect", "triggerPostComments", "triggerNewFollowers"]
+      const explicit = ["triggerDirect", "triggerPostComments"]
         .some(key => typeof bot?.[key] === "boolean");
       const editorContainer = document.createElement("div");
       editorContainer.className = "flowsi-chatbot-edit-inline-container flowsi-chatbot-form-container";
@@ -2144,10 +2370,18 @@ function installChatbotSourceControls() {
             <label for="flowsi-edit-public-reply"><strong>Resposta pública ao comentário</strong></label>
             <textarea id="flowsi-edit-public-reply" class="flowsi-chatbot-public-reply" placeholder="Mensagem que aparecerá como resposta ao comentário"></textarea>
           </div>
-          <label class="flowsi-chatbot-source-option">
-            <input id="flowsi-edit-trigger-followers" type="checkbox">
-            <span>Uma nova pessoa começar a seguir o perfil</span>
-          </label>
+          <div class="flowsi-chatbot-label-control">
+            <label class="flowsi-chatbot-source-option">
+              <input id="flowsi-edit-add-label" type="checkbox">
+              <span>Adicionar etiqueta</span>
+            </label>
+            <div class="flowsi-chatbot-label-select-wrap" hidden>
+              <label for="flowsi-edit-label-column"><strong>Etiqueta (coluna)</strong></label>
+              <select id="flowsi-edit-label-column" class="flowsi-chatbot-label-select">
+                <option value="">Selecione uma etiqueta</option>
+              </select>
+            </div>
+          </div>
         </div>
         <div class="flowsi-chatbot-edit-actions">
           <button type="button" class="flowsi-chatbot-edit-cancel">Cancelar</button>
@@ -2235,19 +2469,28 @@ function installChatbotSourceControls() {
 
       const direct = dialog.querySelector("#flowsi-edit-trigger-direct");
       const comments = dialog.querySelector("#flowsi-edit-trigger-post-comments");
-      const followers = dialog.querySelector("#flowsi-edit-trigger-followers");
       const replyWrap = dialog.querySelector(".flowsi-chatbot-public-reply-wrap");
       const reply = dialog.querySelector("#flowsi-edit-public-reply");
+      const addLabel = dialog.querySelector("#flowsi-edit-add-label");
+      const labelSelectWrap = dialog.querySelector(".flowsi-chatbot-label-select-wrap");
+      const labelSelect = dialog.querySelector("#flowsi-edit-label-column");
       direct.checked = explicit ? bot.triggerDirect === true : true;
       comments.checked = explicit ? bot.triggerPostComments === true : true;
-      followers.checked = explicit ? bot.triggerNewFollowers === true : false;
       reply.value = String(bot.publicCommentReply || "");
+      addLabel.checked = bot.addLabel === true;
+      populateLabelColumns(labelSelect, kanbanColumns, bot.labelColumnId);
       const syncReplyVisibility = () => {
         replyWrap.hidden = !comments.checked;
         reply.required = comments.checked;
       };
+      const syncLabelVisibility = () => {
+        labelSelectWrap.hidden = !addLabel.checked;
+        labelSelect.required = addLabel.checked;
+      };
       comments.addEventListener("change", syncReplyVisibility);
+      addLabel.addEventListener("change", syncLabelVisibility);
       syncReplyVisibility();
+      syncLabelVisibility();
 
       const close = () => {
         editorContainer.remove();
@@ -2262,7 +2505,7 @@ function installChatbotSourceControls() {
         event.preventDefault();
         addEditKeywords(keywordInput.value);
         const keywords = [...editKeywords];
-        if (!direct.checked && !comments.checked && !followers.checked) {
+        if (!direct.checked && !comments.checked) {
           window.alert("Selecione pelo menos uma origem para o gatilho.");
           return;
         }
@@ -2274,6 +2517,10 @@ function installChatbotSourceControls() {
           reply.reportValidity();
           return;
         }
+        if (addLabel.checked && !labelSelect.value) {
+          labelSelect.reportValidity();
+          return;
+        }
         const updatedBots = [...bots];
         updatedBots[botIndex] = {
           ...bot,
@@ -2281,8 +2528,11 @@ function installChatbotSourceControls() {
           template: templateSelect.value,
           triggerDirect: direct.checked,
           triggerPostComments: comments.checked,
-          triggerNewFollowers: followers.checked,
-          publicCommentReply: comments.checked ? reply.value.trim() : ""
+          triggerNewFollowers: false,
+          newFollowersEnabledAt: null,
+          publicCommentReply: comments.checked ? reply.value.trim() : "",
+          addLabel: addLabel.checked,
+          labelColumnId: addLabel.checked ? labelSelect.value : ""
         };
         chrome.storage.local.set({ bots: updatedBots }, () => {
           close();
@@ -2380,30 +2630,52 @@ function installChatbotSourceControls() {
         <label for="flowsi-public-comment-reply"><strong>Resposta pública ao comentário</strong></label>
         <textarea id="flowsi-public-comment-reply" class="flowsi-chatbot-public-reply" placeholder="Mensagem que aparecerá como resposta ao comentário"></textarea>
       </div>
-      <label class="flowsi-chatbot-source-option">
-        <input id="flowsi-trigger-new-followers" type="checkbox">
-        <span>Uma nova pessoa começar a seguir o perfil</span>
-      </label>
+      <div class="flowsi-chatbot-label-control">
+        <label class="flowsi-chatbot-source-option">
+          <input id="flowsi-add-label" type="checkbox">
+          <span>Adicionar etiqueta</span>
+        </label>
+        <div class="flowsi-chatbot-label-select-wrap" hidden>
+          <label for="flowsi-label-column"><strong>Etiqueta (coluna)</strong></label>
+          <select id="flowsi-label-column" class="flowsi-chatbot-label-select">
+            <option value="">Selecione uma etiqueta</option>
+          </select>
+        </div>
+      </div>
     `;
     const buttons = form.querySelector(".flowsi-chatbot-buttons");
     buttons?.before(controls);
     const postCheckbox = controls.querySelector("#flowsi-trigger-post-comments");
     const replyWrap = controls.querySelector(".flowsi-chatbot-public-reply-wrap");
     const replyField = controls.querySelector("#flowsi-public-comment-reply");
+    const addLabel = controls.querySelector("#flowsi-add-label");
+    const labelSelectWrap = controls.querySelector(".flowsi-chatbot-label-select-wrap");
+    const labelSelect = controls.querySelector("#flowsi-label-column");
+    chrome.storage.local.get("kanbanColumns", ({ kanbanColumns = [] }) => {
+      populateLabelColumns(labelSelect, kanbanColumns);
+    });
     postCheckbox.addEventListener("change", () => {
       replyWrap.hidden = !postCheckbox.checked;
       replyField.required = postCheckbox.checked;
       if (postCheckbox.checked) replyField.focus();
+    });
+    addLabel.addEventListener("change", () => {
+      labelSelectWrap.hidden = !addLabel.checked;
+      labelSelect.required = addLabel.checked;
+      if (addLabel.checked) labelSelect.focus();
     });
 
     form.addEventListener("submit", event => {
       const options = {
         triggerDirect: controls.querySelector("#flowsi-trigger-direct").checked,
         triggerPostComments: postCheckbox.checked,
-        triggerNewFollowers: controls.querySelector("#flowsi-trigger-new-followers").checked,
-        publicCommentReply: replyField.value.trim()
+        triggerNewFollowers: false,
+        newFollowersEnabledAt: null,
+        publicCommentReply: replyField.value.trim(),
+        addLabel: addLabel.checked,
+        labelColumnId: addLabel.checked ? labelSelect.value : ""
       };
-      if (!options.triggerDirect && !options.triggerPostComments && !options.triggerNewFollowers) {
+      if (!options.triggerDirect && !options.triggerPostComments) {
         event.preventDefault();
         event.stopImmediatePropagation();
         window.alert("Selecione pelo menos uma origem para o gatilho.");
@@ -2413,6 +2685,12 @@ function installChatbotSourceControls() {
         event.preventDefault();
         event.stopImmediatePropagation();
         replyField.reportValidity();
+        return;
+      }
+      if (options.addLabel && !options.labelColumnId) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        labelSelect.reportValidity();
         return;
       }
 
