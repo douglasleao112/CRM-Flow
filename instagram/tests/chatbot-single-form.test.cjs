@@ -22,5 +22,15 @@ assert.match(
 );
 assert.match(openNewBotHandler, /g\(\[\]\)/);
 assert.match(bundle, /onClick: \(\) => w\("comment"\)/);
+assert.match(
+  bundle,
+  /q\.filter\(\(b\) => b && b\.title\)[\s\S]{0,120}type: b\.type \|\| "text"/,
+  "O seletor de criação deve incluir todos os tipos de mensagem pronta",
+);
+assert.doesNotMatch(
+  bundle,
+  /q\.filter\(\(b\) => b\.type === "text"\)/,
+  "O seletor não pode voltar a limitar o chatbot a texto",
+);
 
-console.log("chatbot-single-form: 8 assertions passed");
+console.log("chatbot-single-form: 10 assertions passed");

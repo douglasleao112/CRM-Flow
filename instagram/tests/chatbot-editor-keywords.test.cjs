@@ -21,5 +21,7 @@ assert.match(contentScript, /id="flowsi-label-column"/);
 assert.match(contentScript, /column\.id \|\| ""\) !== "all-chats"/);
 assert.match(contentScript, /addLabel: addLabel\.checked/);
 assert.match(contentScript, /labelColumnId: addLabel\.checked \? labelSelect\.value : ""/);
+assert.match(contentScript, /const availableTemplates = quickMessages[\s\S]{0,180}type: item\.type \|\| "text"/);
+assert.doesNotMatch(contentScript, /const textTemplates = quickMessages\.filter/);
 
-console.log("chatbot-editor-keywords: 14 assertions passed");
+console.log("chatbot-editor-keywords: 16 assertions passed");

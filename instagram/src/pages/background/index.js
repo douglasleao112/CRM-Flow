@@ -619,6 +619,52 @@ async function sendMessageToInstagram(
   return confirmVisibleDelivery(response);
 }
 
+async function sendMediaToInstagram(
+  username,
+  media,
+  preferredTabId = null,
+  threadId = "",
+  viewerIdHint = "",
+  trustedThreadIdHint = ""
+) {
+  const normalizedUsername = normalizeCrmKey(username);
+  const dataUrl = String(media?.dataUrl || "").trim();
+  const mediaType = String(media?.type || "file");
+  const title = String(media?.title || "arquivo");
+  const canLoadSavedVideo = mediaType === "video" && title.trim();
+  if (!normalizedUsername || !dataUrl && !canLoadSavedVideo) {
+    throw new Error("Usuário ou arquivo do chatbot inválidos.");
+  }
+  let tabId = preferredTabId;
+  if (!tabId) tabId = await getInstagramTabId();
+  if (!tabId) throw new Error("Nenhuma aba do Instagram está aberta.");
+
+  let response = null;
+  try {
+    response = await chrome.tabs.sendMessage(tabId, {
+      action: "flowsiChatbotSendMediaMain",
+      username: normalizedUsername,
+      dataUrl,
+      mediaType,
+      title,
+      caption: String(media?.caption || ""),
+      threadId: String(threadId || ""),
+      viewerId: String(viewerIdHint || ""),
+      trustedThreadId: String(trustedThreadIdHint || "")
+    });
+  } catch (error) {
+    throw new Error(error?.message || "Falha ao enviar o arquivo do chatbot.");
+  }
+  if (response?.success !== true || response?.status !== "sent") {
+    const error = new Error(
+      response?.error || "O Instagram não confirmou o envio do arquivo no Direct."
+    );
+    error.deliveryAttempted = Boolean(response?.deliveryAttempted);
+    throw error;
+  }
+  return response;
+}
+
 const flowsiBulkSendInFlight = new Map();
 const flowsiBulkSendCompleted = new Map();
 const FLOWSI_BULK_DEDUPE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -1139,8 +1185,7 @@ async function appendChatbotDiagnostic(entry) {
 const findTemplate = (quickMessages, bot) => {
   const wanted = normalizeTriggerText(bot?.template);
   return quickMessages.find(item =>
-    normalizeTriggerText(item?.title) === wanted &&
-    (!item?.type || item.type === "text")
+    normalizeTriggerText(item?.title) === wanted
   );
 };
 
@@ -1219,6 +1264,132 @@ const personalizeChatbotMessage = (template, contact = {}) => {
     .replace(/[ \t]+(?=\r?\n|$)/g, "")
     .trim();
 };
+
+const chatbotTemplateType = template => String(template?.type || "text")
+  .trim()
+  .toLowerCase();
+
+const chatbotTemplateMediaUrl = template => String(
+  template?.imageUrl || template?.audioUrl || template?.videoUrl ||
+  template?.fileUrl || template?.mediaUrl || template?.dataUrl || template?.url || ""
+).trim();
+
+async function dispatchChatbotTemplate({
+  template,
+  quickMessages,
+  username,
+  contact,
+  tabId,
+  threadId = "",
+  viewerId = "",
+  trustedThreadId = "",
+  actionKey,
+  completedActions,
+  persistCompletedActions
+}) {
+  if (!template) throw new Error("O modelo de mensagem não foi encontrado.");
+  const stored = await chrome.storage.local.get("quickScripts");
+  const quickScripts = Array.isArray(stored.quickScripts) ? stored.quickScripts : [];
+  const results = [];
+
+  const run = async (currentTemplate, path, scriptStack = []) => {
+    const type = chatbotTemplateType(currentTemplate);
+    const partKey = `${actionKey}:template:${path}`;
+    if (completedActions.has(partKey)) {
+      results.push({ status: "already-completed", transport: "already-completed" });
+      return;
+    }
+
+    if (type === "script") {
+      const scriptName = String(currentTemplate?.title || "").trim();
+      if (scriptStack.includes(scriptName)) {
+        throw new Error(`O script '${scriptName}' contém uma referência circular.`);
+      }
+      const script = quickScripts.find(item =>
+        normalizeTriggerText(item?.name) === normalizeTriggerText(scriptName)
+      );
+      if (!script || !Array.isArray(script.script)) {
+        throw new Error(`Script '${scriptName}' não encontrado.`);
+      }
+      for (let index = 0; index < script.script.length; index += 1) {
+        const step = script.script[index] || {};
+        if (step.type === "gap") {
+          const milliseconds = Math.max(0, Math.min(Number(step.duration) || 0, 3600)) * 1000;
+          if (milliseconds) await new Promise(resolve => setTimeout(resolve, milliseconds));
+          continue;
+        }
+        const referenced = (Array.isArray(quickMessages) ? quickMessages : []).find(item =>
+          normalizeTriggerText(item?.title) === normalizeTriggerText(step.title)
+        );
+        if (!referenced) {
+          throw new Error(`Mensagem '${step.title || ""}' do script '${scriptName}' não encontrada.`);
+        }
+        await run(referenced, `${path}.${index}`, [...scriptStack, scriptName]);
+      }
+      completedActions.add(partKey);
+      await persistCompletedActions();
+      return;
+    }
+
+    let result;
+    const content = personalizeChatbotMessage(currentTemplate?.content, contact);
+    const mediaType = type === "audio" ? "voice" : type;
+    const isKnownMedia = ["image", "voice", "video", "file", "document"].includes(mediaType);
+    const dataUrl = chatbotTemplateMediaUrl(currentTemplate);
+    if (isKnownMedia || dataUrl) {
+      if (!dataUrl && mediaType !== "video") {
+        throw new Error(`O arquivo do modelo '${currentTemplate?.title || ""}' não foi encontrado.`);
+      }
+      try {
+        result = await sendMediaToInstagram(
+          username,
+          {
+            dataUrl,
+            type: mediaType,
+            title: currentTemplate?.title,
+            caption: mediaType === "voice" ? "" : content
+          },
+          tabId,
+          threadId,
+          viewerId,
+          trustedThreadId
+        );
+      } catch (error) {
+        // Once Instagram's send control was activated, retrying the same script
+        // part could duplicate an attachment whose acknowledgement was lost.
+        if (error?.deliveryAttempted) {
+          completedActions.add(partKey);
+          await persistCompletedActions();
+        }
+        throw error;
+      }
+    } else {
+      if (!content) {
+        throw new Error(`O modelo '${currentTemplate?.title || ""}' está vazio ou não é compatível.`);
+      }
+      result = await sendMessageToInstagram(
+        username,
+        content,
+        tabId,
+        threadId,
+        viewerId,
+        trustedThreadId
+      );
+    }
+    results.push(result);
+    completedActions.add(partKey);
+    await persistCompletedActions();
+  };
+
+  await run(template, "0");
+  const delivered = results.filter(result => result?.status !== "already-completed");
+  return {
+    success: true,
+    status: "sent",
+    parts: results.length,
+    transport: delivered.at(-1)?.transport || "already-completed"
+  };
+}
 
 function parseInstagramJsonText(text) {
   const source = String(text || "");
@@ -1668,11 +1839,19 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
           let publicReplyResult = null;
           let labelResult = null;
           if (!username) throw new Error("A notificação não informou o @ do autor.");
-          if (!template?.content) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
-          const directMessage = personalizeChatbotMessage(template.content, contact);
+          if (!template) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
           const publicReply = personalizeChatbotMessage(bot.publicCommentReply, contact);
           if (!completedActions.has(dmActionKey)) {
-            sendResult = await sendMessageToInstagram(username, directMessage, tabId);
+            sendResult = await dispatchChatbotTemplate({
+              template,
+              quickMessages,
+              username,
+              contact,
+              tabId,
+              actionKey: dmActionKey,
+              completedActions,
+              persistCompletedActions
+            });
             completedActions.add(dmActionKey);
             // Persist the Direct independently from the public reply. If the
             // temporary Instagram tab reloads or the worker restarts while
@@ -1755,10 +1934,18 @@ async function processInstagramNotifications(tabId, notifications, bots, csrfTok
         const dmActionKey = `${followerId}:${botKey}:follower-dm`;
         try {
           let sendResult = null;
-          if (!template?.content) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
-          const directMessage = personalizeChatbotMessage(template.content, contact);
+          if (!template) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
           if (!completedActions.has(dmActionKey)) {
-            sendResult = await sendMessageToInstagram(username, directMessage, tabId);
+            sendResult = await dispatchChatbotTemplate({
+              template,
+              quickMessages,
+              username,
+              contact,
+              tabId,
+              actionKey: dmActionKey,
+              completedActions,
+              persistCompletedActions
+            });
             completedActions.add(dmActionKey);
             await persistCompletedActions();
           }
@@ -2267,24 +2454,25 @@ async function processDirectInboxNow(tabId, threads, bots, viewerId) {
       try {
         let sendResult = null;
         let labelResult = null;
-        if (!template?.content) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
+        if (!template) throw new Error(`Modelo '${bot.template || ""}' não encontrado.`);
         const candidateContact = createChatbotContact(
           candidate.username,
           candidate.contactName
         );
-        const directMessage = personalizeChatbotMessage(
-          template.content,
-          candidateContact
-        );
         if (!completedActions.has(dmActionKey)) {
-          sendResult = await sendMessageToInstagram(
-            candidate.username,
-            directMessage,
+          sendResult = await dispatchChatbotTemplate({
+            template,
+            quickMessages,
+            username: candidate.username,
+            contact: candidateContact,
             tabId,
-            candidate.threadId,
-            effectiveViewerId,
-            candidate.trustedThreadId
-          );
+            threadId: candidate.threadId,
+            viewerId: effectiveViewerId,
+            trustedThreadId: candidate.trustedThreadId,
+            actionKey: dmActionKey,
+            completedActions,
+            persistCompletedActions
+          });
           completedActions.add(dmActionKey);
           // The Instagram acknowledgement is the exactly-once boundary. Save
           // it before diagnostics or the next item so a suspended MV3 worker

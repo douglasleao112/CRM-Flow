@@ -5,10 +5,37 @@ const vm = require("node:vm");
 
 const storage = {
   bots: [],
-  quickMessages: [{
-    type: "text",
-    title: "Resposta",
-    content: "Olá <name>! Seu usuário é <username>."
+  quickMessages: [
+    {
+      type: "text",
+      title: "Resposta",
+      content: "Olá <name>! Seu usuário é <username>."
+    },
+    {
+      type: "image",
+      title: "Imagem pronta",
+      content: "Imagem para <nome>",
+      imageUrl: "data:image/png;base64,AA=="
+    },
+    {
+      type: "voice",
+      title: "Áudio pronto",
+      content: "",
+      audioUrl: "data:audio/mpeg;base64,AA=="
+    },
+    {
+      type: "script",
+      title: "Sequência pronta",
+      content: ""
+    }
+  ],
+  quickScripts: [{
+    name: "Sequência pronta",
+    script: [
+      { type: "message", title: "Imagem pronta" },
+      { type: "gap", duration: 0 },
+      { type: "message", title: "Áudio pronto" }
+    ]
   }],
   flowsiChatbotDirectBaselineReady: true,
   flowsiChatbotNotificationBaselineReady: true,
@@ -25,6 +52,7 @@ const storage = {
   flowsiKanbanAssignmentsV2: {}
 };
 const sentMessages = [];
+const sentMedia = [];
 const commentReplies = [];
 const commentReplyRequests = [];
 const fetchCalls = [];
@@ -128,6 +156,14 @@ const chrome = {
           transport: mainSendStatus === "sent" ? "instagram-page-http" : "unconfirmed"
         };
       }
+      if (payload?.action === "flowsiChatbotSendMediaMain") {
+        sentMedia.push(payload);
+        return {
+          success: true,
+          status: "sent",
+          transport: "instagram-thread-media-ui-verified"
+        };
+      }
       if (payload?.action === "sendMessage") {
         sentMessages.push(payload);
         return { status: "activated" };
@@ -194,6 +230,7 @@ const source = fs.readFileSync(backgroundPath, "utf8") + `
 globalThis.__chatbotTestApi = {
   botMatchesText,
   findTemplate,
+  dispatchChatbotTemplate,
   personalizeChatbotMessage,
   sendMessageToInstagram,
   collectInstagramNotifications,
@@ -239,6 +276,46 @@ vm.runInNewContext(source, context, { filename: backgroundPath });
     api.findTemplate([{ title: " Boas Vindas ", content: "Olá" }], { template: "boas vindas" }).content,
     "Olá"
   );
+  assert.equal(
+    api.findTemplate(storage.quickMessages, { template: "imagem pronta" }).type,
+    "image",
+    "O chatbot deve localizar modelos de imagem"
+  );
+  assert.equal(
+    api.findTemplate(storage.quickMessages, { template: "sequência pronta" }).type,
+    "script",
+    "O chatbot deve localizar scripts mesmo sem conteúdo textual"
+  );
+  const mediaCompletedActions = new Set();
+  await api.dispatchChatbotTemplate({
+    template: storage.quickMessages.find(item => item.title === "Imagem pronta"),
+    quickMessages: storage.quickMessages,
+    username: "cliente.midia",
+    contact: { username: "cliente.midia", name: "Cliente Mídia" },
+    tabId: 1,
+    actionKey: "media-single",
+    completedActions: mediaCompletedActions,
+    persistCompletedActions: async () => {}
+  });
+  assert.equal(sentMedia.length, 1);
+  assert.equal(sentMedia[0].mediaType, "image");
+  assert.equal(sentMedia[0].caption, "Imagem para Cliente Mídia");
+  await api.dispatchChatbotTemplate({
+    template: storage.quickMessages.find(item => item.title === "Sequência pronta"),
+    quickMessages: storage.quickMessages,
+    username: "cliente.script",
+    contact: { username: "cliente.script", name: "Cliente Script" },
+    tabId: 1,
+    actionKey: "media-script",
+    completedActions: mediaCompletedActions,
+    persistCompletedActions: async () => {}
+  });
+  assert.deepEqual(
+    sentMedia.slice(1).map(item => item.mediaType),
+    ["image", "voice"],
+    "O script deve executar imagem e áudio na ordem cadastrada"
+  );
+  assert.equal(sentMedia[2].caption, "", "Áudio deve manter o comportamento atual sem legenda");
   assert.equal(
     api.personalizeChatbotMessage(
       "Oi <name>; nome: <nome>; primeiro: <primeironome> (<username>)",
@@ -502,7 +579,7 @@ vm.runInNewContext(source, context, { filename: backgroundPath });
     "Uma fila sem confirmação não pode ser registrada como envio concluído"
   );
 
-  console.log("chatbot-engine: 31 assertions passed");
+  console.log("chatbot-engine: 38 assertions passed");
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

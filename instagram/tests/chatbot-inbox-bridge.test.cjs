@@ -52,6 +52,19 @@ test("o envio só conclui depois da confirmação real do Instagram", () => {
   assert.match(background, /fallback\.status !== "sent"/);
 });
 
+test("imagem, áudio e vídeo usam a ponte de anexos sem abrir uma janela visível", () => {
+  assert.match(background, /action: "flowsiChatbotSendMediaMain"/);
+  assert.match(background, /\["image", "voice", "video", "file", "document"\]/);
+  assert.match(background, /type === "script"/);
+  assert.match(loader, /flowsi-chatbot-media-send-request-v1/);
+  assert.match(loader, /readSavedQuickMessageVideo/);
+  assert.match(loader, /indexedDB\.open\("keyval-store", 1\)/);
+  assert.match(main, /sendChatbotMediaThroughThreadUi/);
+  assert.match(main, /left: "-12000px"/);
+  assert.match(main, /input\[type="file"\]/);
+  assert.match(main, /instagram-thread-media-ui-verified/);
+});
+
 test("o chatbot resolve o usuário e o thread_id real antes de responder", () => {
   assert.match(loader, /threadId: String\(threadId \|\| ""\)/);
   assert.match(background, /candidate\.threadId/);

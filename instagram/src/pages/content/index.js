@@ -2334,7 +2334,9 @@ function installChatbotSourceControls() {
       editorContainer.className = "flowsi-chatbot-edit-inline-container flowsi-chatbot-form-container";
       const dialog = document.createElement("form");
       dialog.className = "flowsi-chatbot-edit-dialog";
-      const textTemplates = quickMessages.filter(item => item?.type === "text");
+      const availableTemplates = quickMessages
+        .filter(item => item?.title)
+        .map(item => ({ ...item, type: item.type || "text" }));
       let editKeywords = [...new Set(
         (Array.isArray(bot.keywords) ? bot.keywords : [])
           .map(value => String(value || "").trim())
@@ -2452,14 +2454,14 @@ function installChatbotSourceControls() {
       });
       renderEditKeywords();
       const templateSelect = dialog.querySelector("#flowsi-edit-template");
-      for (const template of textTemplates) {
+      for (const template of availableTemplates) {
         const option = document.createElement("option");
         option.value = template.title;
         option.textContent = template.title;
         option.selected = template.title === bot.template;
         templateSelect.appendChild(option);
       }
-      if (bot.template && !textTemplates.some(template => template.title === bot.template)) {
+      if (bot.template && !availableTemplates.some(template => template.title === bot.template)) {
         const missingOption = document.createElement("option");
         missingOption.value = bot.template;
         missingOption.textContent = `${bot.template} (modelo não encontrado)`;

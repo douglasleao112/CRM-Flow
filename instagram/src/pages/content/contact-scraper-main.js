@@ -1,5 +1,5 @@
 (() => {
-  const SCRAPER_VERSION = "2026.10.29.37";
+  const SCRAPER_VERSION = "2026.10.29.38";
   if (window.__flowsiContactScraperVersion === SCRAPER_VERSION) return;
   window.__flowsiContactScraperVersion = SCRAPER_VERSION;
   window.__flowsiContactScraperInstalled = true;
@@ -26,6 +26,8 @@
   const CHATBOT_COMMENT_REPLY_RESPONSE_SOURCE = "flowsi-chatbot-comment-reply-response-v5";
   const CHATBOT_SEND_REQUEST_SOURCE = "flowsi-chatbot-send-request-v8";
   const CHATBOT_SEND_RESPONSE_SOURCE = "flowsi-chatbot-send-response-v8";
+  const CHATBOT_MEDIA_SEND_REQUEST_SOURCE = "flowsi-chatbot-media-send-request-v1";
+  const CHATBOT_MEDIA_SEND_RESPONSE_SOURCE = "flowsi-chatbot-media-send-response-v1";
   const CHATBOT_REALTIME_EVENT_SOURCE = "flowsi-chatbot-realtime-event-v2";
   const USERNAME_PATTERN = /^[A-Za-z0-9._]{1,30}$/;
   const INBOX_CONTACT_LIMIT_PER_FOLDER = 20;
@@ -2247,6 +2249,194 @@
     } finally {
       if (frame) frame.remove();
     }
+  }
+
+  async function sendChatbotMediaThroughThreadUi(threadId, dataUrl, mediaType, title, caption) {
+    const currentThreadId = location.pathname.match(/^\/direct\/t\/(\d+)/)?.[1] || "";
+    let frame = null;
+    let frameDocument = currentThreadId === String(threadId) ? document : null;
+    let frameWindow = frameDocument ? window : null;
+    if (!frameDocument) {
+      frame = document.createElement("iframe");
+      frame.setAttribute("aria-hidden", "true");
+      frame.tabIndex = -1;
+      Object.assign(frame.style, {
+        position: "fixed",
+        left: "-12000px",
+        top: "0",
+        width: "1280px",
+        height: "900px",
+        opacity: "0",
+        pointerEvents: "none",
+        border: "0"
+      });
+      frame.src = `/direct/t/${encodeURIComponent(threadId)}/`;
+      document.body.appendChild(frame);
+    }
+    let deliveryAttempted = false;
+    try {
+      const deadline = Date.now() + 30000;
+      let fileInput = null;
+      while (Date.now() < deadline && !fileInput) {
+        if (frame) {
+          try {
+            frameDocument = frame.contentDocument;
+            frameWindow = frame.contentWindow;
+          } catch {
+            frameDocument = null;
+            frameWindow = null;
+          }
+        }
+        if (frameDocument) {
+          fileInput = [...frameDocument.querySelectorAll('input[type="file"]')]
+            .find(input => !input.disabled) || null;
+        }
+        if (!fileInput) await sleep(150);
+      }
+      if (!fileInput || !frameDocument || !frameWindow) {
+        throw new Error("O anexo do Direct não ficou disponível.");
+      }
+
+      const response = await fetch(String(dataUrl || ""));
+      if (!response.ok) throw new Error("Não foi possível abrir o arquivo salvo.");
+      const blob = await response.blob();
+      const subtype = String(blob.type || "application/octet-stream").split("/")[1]
+        ?.split(";")[0]
+        ?.replace(/[^a-z0-9.+-]/gi, "") || "bin";
+      const baseName = String(title || mediaType || "arquivo")
+        .replace(/[^a-z0-9._-]+/gi, "-")
+        .replace(/^-+|-+$/g, "") || "arquivo";
+      const fileName = baseName.includes(".") ? baseName : `${baseName}.${subtype}`;
+      const FileConstructor = frameWindow.File || File;
+      const DataTransferConstructor = frameWindow.DataTransfer || DataTransfer;
+      const file = new FileConstructor([blob], fileName, { type: blob.type });
+      const transfer = new DataTransferConstructor();
+      transfer.items.add(file);
+
+      const messageArticleSelector =
+        '[role="article"][aria-roledescription="message"], [role="article"]';
+      const beforeArticleElements = new Set(
+        frameDocument.querySelectorAll(messageArticleSelector)
+      );
+      fileInput.files = transfer.files;
+      fileInput.dispatchEvent(new frameWindow.Event("input", { bubbles: true }));
+      fileInput.dispatchEvent(new frameWindow.Event("change", { bubbles: true }));
+      await sleep(900);
+
+      const editor = [...frameDocument.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+        .find(element => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 120 && rect.height >= 16;
+        }) || null;
+      const text = String(caption || "").trim();
+      if (editor && text) {
+        editor.focus();
+        editor.click();
+        let inserted = false;
+        try { inserted = frameDocument.execCommand("insertText", false, text); } catch {}
+        if (!inserted || normalize(editor.textContent) !== normalize(text)) {
+          editor.textContent = text;
+          editor.dispatchEvent(new frameWindow.InputEvent("input", {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            inputType: "insertText",
+            data: text
+          }));
+        }
+      }
+
+      const sendButton = [...frameDocument.querySelectorAll('button, [role="button"]')]
+        .filter(button => !button.disabled)
+        .reverse()
+        .find(button => {
+          const label = `${button.textContent || ""} ${button.getAttribute("aria-label") || ""}`.trim();
+          return /^(enviar|send)(\s|$)/i.test(label);
+        });
+      if (sendButton) {
+        deliveryAttempted = true;
+        sendButton.click();
+      } else if (editor) {
+        deliveryAttempted = true;
+        for (const eventType of ["keydown", "keypress", "keyup"]) {
+          editor.dispatchEvent(new frameWindow.KeyboardEvent(eventType, {
+            key: "Enter",
+            code: "Enter",
+            keyCode: 13,
+            which: 13,
+            bubbles: true,
+            cancelable: true
+          }));
+        }
+      } else {
+        throw new Error("O botão de envio do anexo não ficou disponível.");
+      }
+
+      const confirmationDeadline = Date.now() + 20000;
+      while (Date.now() < confirmationDeadline) {
+        await sleep(250);
+        const currentArticles = [...frameDocument.querySelectorAll(messageArticleSelector)];
+        if (currentArticles.some(article => !beforeArticleElements.has(article))) {
+          return {
+            success: true,
+            status: "sent",
+            threadId,
+            transport: "instagram-thread-media-ui-verified"
+          };
+        }
+      }
+      const error = new Error("O arquivo não apareceu na conversa após o envio.");
+      error.deliveryAttempted = deliveryAttempted;
+      throw error;
+    } catch (error) {
+      error.deliveryAttempted = Boolean(error?.deliveryAttempted || deliveryAttempted);
+      throw error;
+    } finally {
+      if (frame) frame.remove();
+    }
+  }
+
+  async function sendChatbotMedia(
+    username,
+    dataUrl,
+    mediaType,
+    title,
+    caption,
+    existingThreadId = "",
+    viewerIdHint = "",
+    trustedThreadId = ""
+  ) {
+    const normalizedUsername = String(username || "").trim().toLowerCase().replace(/^@+/, "");
+    if (!isUsername(normalizedUsername) || !String(dataUrl || "").trim()) {
+      throw new Error("Destinatário ou arquivo do chatbot inválidos.");
+    }
+    const headers = {
+      accept: "*/*",
+      "x-ig-app-id": "936619743392459",
+      "x-asbd-id": "129477",
+      "x-instagram-ajax": "1",
+      "x-csrftoken": csrfToken(),
+      "x-requested-with": "XMLHttpRequest"
+    };
+    const formHeaders = {
+      ...headers,
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    const destination = await resolveChatbotDestination(
+      normalizedUsername,
+      String(existingThreadId || ""),
+      headers,
+      formHeaders,
+      viewerIdHint,
+      trustedThreadId
+    );
+    return sendChatbotMediaThroughThreadUi(
+      destination.threadId,
+      dataUrl,
+      mediaType,
+      title,
+      caption
+    );
   }
 
   function topicListRoot(sourceDocument = document) {
@@ -4885,6 +5075,43 @@
           requestId,
           success: false,
           error: error?.message || "Falha ao enviar a mensagem do chatbot.",
+          deliveryAttempted: Boolean(error?.deliveryAttempted)
+        }, "*"));
+      return;
+    }
+    if (event.data?.source === CHATBOT_MEDIA_SEND_REQUEST_SOURCE) {
+      const {
+        requestId,
+        username,
+        dataUrl,
+        mediaType,
+        title,
+        caption,
+        threadId,
+        viewerId,
+        trustedThreadId
+      } = event.data;
+      sendChatbotMedia(
+        username,
+        dataUrl,
+        mediaType,
+        title,
+        caption,
+        threadId,
+        viewerId,
+        trustedThreadId
+      )
+        .then(result => window.postMessage({
+          source: CHATBOT_MEDIA_SEND_RESPONSE_SOURCE,
+          requestId,
+          success: true,
+          result
+        }, "*"))
+        .catch(error => window.postMessage({
+          source: CHATBOT_MEDIA_SEND_RESPONSE_SOURCE,
+          requestId,
+          success: false,
+          error: error?.message || "Falha ao enviar o arquivo do chatbot.",
           deliveryAttempted: Boolean(error?.deliveryAttempted)
         }, "*"));
       return;

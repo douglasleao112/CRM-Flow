@@ -1,5 +1,5 @@
 (() => {
-  const BRIDGE_VERSION = "2026.10.29.20";
+  const BRIDGE_VERSION = "2026.10.29.21";
   if (window.__crmFlowContactLoaderVersion === BRIDGE_VERSION) return;
   window.__crmFlowContactLoaderVersion = BRIDGE_VERSION;
 
@@ -13,6 +13,8 @@
   const CHATBOT_COMMENT_REPLY_RESPONSE_SOURCE = "flowsi-chatbot-comment-reply-response-v5";
   const CHATBOT_SEND_REQUEST_SOURCE = "flowsi-chatbot-send-request-v8";
   const CHATBOT_SEND_RESPONSE_SOURCE = "flowsi-chatbot-send-response-v8";
+  const CHATBOT_MEDIA_SEND_REQUEST_SOURCE = "flowsi-chatbot-media-send-request-v1";
+  const CHATBOT_MEDIA_SEND_RESPONSE_SOURCE = "flowsi-chatbot-media-send-response-v1";
   const CHATBOT_REALTIME_EVENT_SOURCE = "flowsi-chatbot-realtime-event-v2";
 
   const normalizeVisibleText = value => String(value || "")
@@ -545,6 +547,100 @@
     });
   }
 
+  function readSavedQuickMessageVideo(title) {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open("keyval-store", 1);
+      request.onerror = () => reject(
+        request.error || new Error("Falha ao abrir o armazenamento de vídeos.")
+      );
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("keyval")) {
+          request.result.createObjectStore("keyval");
+        }
+      };
+      request.onsuccess = () => {
+        const database = request.result;
+        let transaction;
+        try {
+          transaction = database.transaction("keyval", "readonly");
+        } catch (error) {
+          database.close();
+          reject(error);
+          return;
+        }
+        const valueRequest = transaction.objectStore("keyval").get(String(title || ""));
+        valueRequest.onerror = () => reject(
+          valueRequest.error || new Error("Falha ao ler o vídeo salvo.")
+        );
+        valueRequest.onsuccess = () => {
+          const value = String(valueRequest.result || "");
+          if (value) resolve(value);
+          else reject(new Error(`O vídeo '${title || ""}' não foi encontrado.`));
+        };
+        transaction.oncomplete = () => database.close();
+        transaction.onabort = () => database.close();
+      };
+    });
+  }
+
+  async function sendChatbotMedia(
+    username,
+    dataUrl,
+    mediaType,
+    title,
+    caption,
+    threadId = "",
+    viewerId = "",
+    trustedThreadId = ""
+  ) {
+    let resolvedDataUrl = String(dataUrl || "").trim();
+    if (!resolvedDataUrl && String(mediaType || "").toLowerCase() === "video") {
+      resolvedDataUrl = await readSavedQuickMessageVideo(title);
+    }
+    if (!resolvedDataUrl) throw new Error("O arquivo da mensagem pronta não foi encontrado.");
+    return new Promise((resolve, reject) => {
+      const requestId = `flowsi-chatbot-media-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", onResponse);
+        reject(new Error("O Instagram demorou para confirmar o envio do arquivo."));
+      }, 90000);
+
+      function onResponse(event) {
+        if (
+          event.source !== window ||
+          event.data?.source !== CHATBOT_MEDIA_SEND_RESPONSE_SOURCE ||
+          event.data?.requestId !== requestId
+        ) return;
+        clearTimeout(timeout);
+        window.removeEventListener("message", onResponse);
+        if (event.data.success) resolve(event.data.result);
+        else {
+          const error = new Error(
+            event.data.error || "O Instagram não confirmou o envio do arquivo."
+          );
+          error.deliveryAttempted = Boolean(event.data.deliveryAttempted);
+          reject(error);
+        }
+      }
+
+      window.addEventListener("message", onResponse);
+      window.postMessage({
+        source: CHATBOT_MEDIA_SEND_REQUEST_SOURCE,
+        requestId,
+        username,
+        dataUrl: resolvedDataUrl,
+        mediaType,
+        title,
+        caption,
+        threadId: String(threadId || ""),
+        viewerId: /^\d+$/.test(String(viewerId || "")) ? String(viewerId) : "",
+        trustedThreadId: /^\d+$/.test(String(trustedThreadId || ""))
+          ? String(trustedThreadId)
+          : ""
+      }, "*");
+    });
+  }
+
   function scrapeContacts(loadMore, knownContacts, cursors, apiOnly) {
     return new Promise((resolve, reject) => {
       const requestId = `flowsi-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -713,6 +809,26 @@
         .then(sendResponse)
         .catch(error => sendResponse({
           success: false,
+          error: error?.message,
+          deliveryAttempted: Boolean(error?.deliveryAttempted)
+        }));
+      return true;
+    }
+    if (message?.action === "flowsiChatbotSendMediaMain") {
+      sendChatbotMedia(
+        message.username,
+        message.dataUrl,
+        message.mediaType,
+        message.title,
+        message.caption,
+        message.threadId,
+        message.viewerId,
+        message.trustedThreadId
+      )
+        .then(sendResponse)
+        .catch(error => sendResponse({
+          success: false,
+          status: "unconfirmed",
           error: error?.message,
           deliveryAttempted: Boolean(error?.deliveryAttempted)
         }));

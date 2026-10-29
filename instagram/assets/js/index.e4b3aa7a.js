@@ -12885,7 +12885,10 @@ const Jg = () => {
         ["bots", "quickMessages"],
         ({ bots: O = [], quickMessages: q = [] }) => {
           (s(O), p("local"));
-          const v = q.filter((b) => b.type === "text").map((b) => b);
+          const v = q.filter((b) => b && b.title).map((b) => ({
+            ...b,
+            type: b.type || "text",
+          }));
           d(v);
         },
       );

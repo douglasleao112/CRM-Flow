@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CRM Flow",
   "default_locale": "pt_BR",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "CRM unificado para WhatsApp, Gmail e Instagram.",
   "permissions": ["storage", "alarms", "tabs", "scripting", "cookies", "activeTab", "declarativeNetRequest", "declarativeNetRequestWithHostAccess", "unlimitedStorage"],
   "host_permissions": ["https://web.whatsapp.com/*", "https://mail.google.com/*", "*://*.instagram.com/*", "https://github.com/*", "https://objects.githubusercontent.com/*", "https://unpkg.com/*"],
